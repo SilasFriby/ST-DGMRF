@@ -1,0 +1,8 @@
+torch==1.13.1
+numpy==1.24.2
+wandb==0.13.9
+matplotlib==3.6.3
+scikit-learn==0.24.1
+scipy==1.10.0
+scikit-sparse==0.4.6
+networkx==3.0

@@ -1,0 +1,124 @@
+
+<wandb.sdk.wandb_run.Run object at 0x297e12d90>
+tensor([True, True, True,  ..., True, True, True])
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/Users/uc291369/graph-DGMRF/.venv/lib/python3.11/site-packages/torch_geometric/data/data.py", line 559, in __getattr__
+    return getattr(self._store, key)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/uc291369/graph-DGMRF/.venv/lib/python3.11/site-packages/torch_geometric/data/storage.py", line 96, in __getattr__
+    raise AttributeError(
+AttributeError: 'GlobalStorage' object has no attribute 'attributes'
+tensor([[ 0.1002],
+        [-0.0055],
+        [ 0.3931],
+        ...,
+        [ 0.2628],
+        [ 0.1988],
+        [ 0.2063]])
+Data(x=[3000, 1], edge_index=[2, 17954], pos=[3000, 2], mask=[3000], eigvals=[3000])
+tensor([ 1.0000,  0.9985,  0.9985,  ..., -0.3124, -0.3117, -0.3193])
+Data(x=[3000, 1], edge_index=[2, 17954], pos=[3000, 2], mask=[3000], eigvals=[3000])
+tensor([[ 0.1002],
+        [-0.0055],
+        [ 0.3931],
+        ...,
+        [ 0.2628],
+        [ 0.1988],
+        [ 0.2063]])
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/Users/uc291369/graph-DGMRF/.venv/lib/python3.11/site-packages/torch_geometric/data/data.py", line 559, in __getattr__
+    return getattr(self._store, key)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/uc291369/graph-DGMRF/.venv/lib/python3.11/site-packages/torch_geometric/data/storage.py", line 96, in __getattr__
+    raise AttributeError(
+AttributeError: 'GlobalStorage' object has no attribute 'edge'
+Data(x=[3000, 1], edge_index=[2, 17954], pos=[3000, 2], mask=[3000], eigvals=[3000])
+tensor([[   0,    0,    0,  ..., 2999, 2999, 2999],
+        [ 581,  647, 1212,  ..., 2210, 2227, 2398]])
+tensor([[0.8823, 0.9150],
+        [0.3829, 0.9593],
+        [0.3904, 0.6009],
+        ...,
+        [0.3057, 0.0075],
+        [0.2517, 0.0367],
+        [0.0820, 0.0012]])
+tensor([True, True, True,  ..., True, True, True])
+tensor([ 1.0000,  0.9985,  0.9985,  ..., -0.3124, -0.3117, -0.3193])
+'toy_gmrf42_random'
+{'graph_post_true_mean': Data(x=[3000, 1], edge_index=[2, 17954], pos=[3000, 2]), 'graph_x': Data(x=[3000, 1], edge_index=[2, 17954], pos=[3000, 2], mask=[3000]), 'graph_y': Data(x=[3000, 1], edge_index=[2, 17954], pos=[3000, 2], mask=[3000], eigvals=[3000]), 'graph_post_true_std': Data(x=[3000, 1], edge_index=[2, 17954], pos=[3000, 2])}
+  File "<stdin>", line 24
+    neighbor_down = node - n_        neighbor_down = node - n_        neionary
+                                     ^^^^^^^^^^^^^
+SyntaxError: invalid syntax
+  File "<stdin>", line 1
+    neighbor_dict = {
+IndentationError: unexpected indent
+  File "<stdin>", line 1
+    "right"        "right"        "right"    neighbor_left,
+IndentationError: unexpected indent
+  File "<stdin>", line 1
+    tu                  ret                                       ate_matrix_M(n_lattice, D, v):
+IndentationError: unexpected indent
+  File "<stdin>", line 1
+    if neighbor_name == "right":
+IndentationError: unexpected indent
+  File "<stdin>", line 1
+    direction = np.array([1, 0])
+IndentationError: unexpected indent
+  File "<stdin>", line 1
+    elif neighbor_name == "left":
+IndentationError: unexpected indent
+  File "<stdin>", line 1
+    direction =                 direction =                 direction =                         direction =                 direction =                 direction =                         direction =                 direction =               du                direction =                 direction =                 direction =   = D - 0.5 * np.dot(directi                direction =                 direction =                 direction =                         direction =                 direction =                 direction =                         direction =                 direction =               du                direction =                 direction =                 direction =   = D - 0.5 * np.dot(directi                direction =                 direction =                 direction =                         direction =                 direction =           nspose().dot(S_0)
+IndentationError: unexpected indent
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+NameError: name 'rho_matrix' is not defined
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+NameError: name 'rho_matrix_mask' is not defined
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+NameError: name 'rho_matrix_mask' is not defined
+
+
+
+
+
+
+100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████| 19/19 [00:13<00:00,  1.40it/s]
+  File "<stdin>", line 3
+    for t    for t    for t    for t    for t   i in range(mask_start, mask_start + w):
+             ^^^
+SyntaxError: invalid syntax
+  File "<stdin>", line 1
+    for j in             for j iask_start + w):
+IndentationError: unexpected indent
+  File "<stdin>", line 1
+    index = i * n_lattice + j
+IndentationError: unexpected indent
+  File "<stdin>", line 1
+    ]                                    to NaN for missing data)
+IndentationError: unexpected indent
+  File "<stdin>", line 1
+    return rho_matrix
+IndentationError: unexpected indent
+  File "<stdin>", line 1
+    t_start = t_start = t_start = t_start = t_start = t_start = tt_start = t_start = t_start = t_start = t_start = t_start = tt_start = t_start = t_star_mt_start = t_start = t_starx.t_start = t_start =end, w, n_lattice)
+                                                                                                                                                                                                                          ^
+SyntaxError: unmatched ')'
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+NameError: name 'rho_matrix_mask' is not defined
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+NameError: name 'rho_matrix_mask' is not defined
+
+
+
+
+
+
+
