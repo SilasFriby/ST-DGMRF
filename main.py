@@ -18,13 +18,15 @@ import constants
 import utils
 import inference
 
+from temporal_model import TemporalModel
+
 def get_config():
     parser = argparse.ArgumentParser(description='Graph DGMRF')
     # If config file should be used
     parser.add_argument("--config", type=str, help="Config file to read run config from")
 
     # General
-    parser.add_argument("--dataset", type=str, default="toy_gmrf42_random",
+    parser.add_argument("--dataset", type=str, default="advection_diffusion", #"toy_gmrf42_random", #
             help="Which dataset to use")
     parser.add_argument("--seed", type=int, default=123,
             help="Seed for random number generator")
@@ -43,7 +45,7 @@ def get_config():
 
     # Model Architecture
     parser.add_argument("--n_layers", type=int,
-                        help="Number of message passing layers", default=2) #1
+                        help="Number of message passing layers", default=1) 
     parser.add_argument("--use_bias", type=int, default=1,
                         help="Use bias parameter in layers")
     parser.add_argument("--non_linear", type=int, default=0,
@@ -62,7 +64,7 @@ def get_config():
             help="How many iterations to train for", default=1000) #1000
     parser.add_argument("--val_interval", type=int, default=100, #100
             help="Evaluate model every val_interval:th iteration")
-    parser.add_argument("--n_training_samples", type=int, default=10, #10
+    parser.add_argument("--n_training_samples", type=int, default=2, #10
         help="Number of samples to use for each iteration in training")
     parser.add_argument("--lr", type=float,
             help="Learning rate", default=0.01)
@@ -86,6 +88,14 @@ def get_config():
         help="If plots should also be saved as .pdf-files")
     parser.add_argument("--dump_prediction", type=int, default=0,
         help="If produced graphs should be saved to files")
+    
+    # Temporal
+    parser.add_argument("--n_lattice", type=int, default=30,
+        help="Number of lattice points in each dimension")
+    parser.add_argument("--n_time", type=float, default=2,
+        help="Number of time steps")
+    parser.add_argument("--n_layers_temporal", type=float, default=1,
+        help="Number of layers in temporal model")
 
     args = parser.parse_args()
     config = vars(args)
@@ -112,11 +122,13 @@ def seed_all(seed):
     torch.manual_seed(seed)
 
 def main():
+
+    # Get config parameters
     config = get_config()
 
-    # (implementation details force this, but not a problem)
-    assert config["plot_vi_samples"] <= config["n_training_samples"], (
-            "plot_vi_samples must be less or equal to than n_training_samples")
+    # # (implementation details force this, but not a problem)
+    # assert config["plot_vi_samples"] <= config["n_training_samples"], (
+    #         "plot_vi_samples must be less or equal to than n_training_samples")
 
     # Set all random seeds
     seed_all(config["seed"])
@@ -132,37 +144,21 @@ def main():
 
     # Load data
     dataset_dict = utils.load_dataset(config["dataset"])
-    graph_y = dataset_dict["graph_y"]
 
-    if config["features"]:
-        assert hasattr(graph_y, "features"), "No features found for dataset"
+    # Initialize optimal parameters tuple
+    opt_params = ()
 
-    # Init wandb
-    wandb_name = "{}-{}".format(config["dataset"],
-                time.strftime("%H-%M"))
-    wandb.init(project=constants.WANDB_PROJECT, config=config, name=wandb_name)
-
-    # Define DGMRF
-    dgmrf = DGMRF(graph_y, config)
-    opt_params = tuple(dgmrf.parameters())
-
-    graph_y.eigvals
-
-    val_mask = torch.logical_not(graph_y.mask) # True for unobserved nodes
-    graph_y.n_observed = torch.sum(graph_y.mask).to(torch.float32)
-    graph_y.n_unobserved = torch.sum(val_mask).to(torch.float32)
-
+    # Add noise std to opt_param if learn_noise_std == 1
     config["log_noise_std"] = torch.log(torch.tensor(config["noise_std"]))
     if config["learn_noise_std"]:
         # Initalize using noise_std in config
         config["log_noise_std"] = torch.nn.parameter.Parameter(config["log_noise_std"])
-        opt_params += (config["log_noise_std"],)
+        opt_params = (config["log_noise_std"],)
 
-    # Train using VI
-    vi_dist = vi.VariationalDist(config, graph_y)
-    opt_params += tuple(vi_dist.parameters())
-
+    # Set optimizer for stochastic gradient descent algorithm
     opt = utils.get_optimizer(config["optimizer"])(opt_params, lr=config["lr"])
+    
+    # Initialize total loss
     total_loss = torch.zeros(1)
 
     # Training loop
@@ -170,13 +166,81 @@ def main():
     best_params = None
 
     for iteration_i in range(config["n_iterations"]):
+        
+        # Reset gradients to zero
         opt.zero_grad()
 
-        loss = vi.vi_loss(dgmrf, vi_dist, graph_y, config)
+        for k in range(config["n_time"]):
 
-        # Train
-        loss.backward()
-        opt.step()
+            ## Data
+
+            # Graph data
+            graph_y = dataset_dict["graph_y_" + str(k)]
+
+            # Masked data
+            val_mask = torch.logical_not(graph_y.mask) # True for unobserved nodes
+            graph_y.n_observed = torch.sum(graph_y.mask).to(torch.float32)
+            graph_y.n_unobserved = torch.sum(val_mask).to(torch.float32)
+
+
+            ## Temporal and spatial models
+
+            # Instatiate temporal model
+            temporal_model = TemporalModel(config)
+
+            # Instatiate spatial model
+            dgmrf = DGMRF(graph_y, config)
+
+            # Add temporal model and spatial model parameters to opt_params
+            opt_params += tuple(temporal_model.parameters())
+            opt_params += tuple(dgmrf.parameters())
+
+
+            ## Train using variational distribution - i.e use ELBO as loss
+
+            # Instatiate variational distribution
+            vi_dist = vi.VariationalDist(config, graph_y)
+
+            # Add variational distribution parameters to opt_params
+            opt_params += tuple(vi_dist.parameters())
+
+            # Sample from variational distribution
+            vi_samples = vi_dist.sample()
+
+            # Prepare vi samples for batched temporal model
+            # Hence, reshape to (n_samples, n_nodes, 1) for torch.bmm in temporal.py to work correctly
+            vi_samples_temporal_batch_format = vi_samples.unsqueeze(2)
+
+            # Feed samples through temporal model
+            vi_samples_temporal_transform = temporal_model(vi_samples_temporal_batch_format)
+            print(vi_samples_temporal_transform.shape)
+
+            # Prepare vi samples after temporal transform for batched spatial model
+            vi_dist.sample_batch.x = vi_samples_temporal_transform.reshape(-1,1)
+
+            # Feed samples through spatial model
+            vi_samples_temporal_spatial_transform = dgmrf(vi_dist.sample_batch)
+
+            # Compute log determinant of variational distribution
+            vi_log_det = vi_dist.log_det()
+
+            # Construct loss
+            l1 = 0.5*vi_log_det
+            l2 = -graph_y.n_observed*config["log_noise_std"]
+            l3 = dgmrf.log_det()
+            l4 = -(1./(2. * config["n_training_samples"])) * torch.sum(torch.pow(g,2))
+            l5 = -(1./(2. * utils.noise_var(config)*\
+                config["n_training_samples"]))*torch.sum(torch.pow(
+                    (vi_samples - graph_y.x.flatten()), 2)[:, graph_y.mask])
+            
+            elbo = l1 + l2 + l3 + l4 + l5
+            loss = (-1./graph_y.num_nodes)*elbo
+
+        # loss = vi.vi_loss(dgmrf, vi_dist, graph_y, config)
+
+        # # Train
+        # loss.backward()
+        # opt.step()
 
         total_loss += loss.detach()
 
@@ -201,12 +265,12 @@ def main():
             print("Iteration: {}, loss: {:.6}, val_error: {}".format(
                 (iteration_i+1), mean_loss, val_error))
 
-            wandb.log({
-                "loss": mean_loss,
-                "val_error": val_error,
-                "iteration": (iteration_i+1),
-                "noise_std": utils.noise_std(config),
-            })
+            # wandb.log({
+            #     "loss": mean_loss,
+            #     "val_error": val_error,
+            #     "iteration": (iteration_i+1),
+            #     "noise_std": utils.noise_std(config),
+            # })
 
             # Save best params
             if (best_loss == None) or (mean_loss < best_loss):

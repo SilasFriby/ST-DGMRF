@@ -72,7 +72,7 @@ class FlexLayer(LinearLayer):
         if self.eigvals_log_det:
             # Eigenvalue-based method
             eigvals = self.neighbor_weight[0]*self.adj_eigvals + self.self_weight[0]
-            agg_contrib = torch.sum(torch.log(torch.abs(eigvals))) # from (aI+aD^-1A)
+            agg_contrib = torch.sum(torch.log(torch.abs(eigvals))) # from (aI+bD^-1A)
             degree_contrib = self.degree_power*self.sum_log_degrees # From D^gamma
             return agg_contrib + degree_contrib
         else:

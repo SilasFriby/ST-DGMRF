@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import igraph as ig
 import torch
 from torch_geometric.data import Data
+from torch_geometric.utils import to_undirected
 
 # Initialize parameters
 D = 0.01  # Diffusion coefficient
@@ -202,7 +203,7 @@ rho_matrix_mask = apply_mask(rho_matrix.copy(), t_start, t_end, w, n_lattice)
 ## Create observations by adding noise term to the masked simulations with sd sigma
 
 noise_obs = np.random.normal(0, sigma_obs, rho_matrix_mask.shape)
-obs_matrix = rho_matrix_mask + noise_obs
+obs_matrix = rho_matrix + noise_obs # mask is applied later in vi.py
 
 # ## Create observation plot
 
@@ -233,35 +234,35 @@ edge_list = [(edge.source, edge.target) for edge in lattice.es]
 
 # Convert to a tensor
 edge_index = torch.tensor(edge_list, dtype=torch.long).t().contiguous()
-
-# Assume obs_matrix is available here 
-# obs_matrix = ...
+edge_index = to_undirected(edge_index)
 
 # Eigen values
 eigen_values_inverse_D_A, _ = np.linalg.eig(approximate_inverse(degree_matrix) @ A)
-alpha_0, beta_0 = 1, -1
-alpha, beta = 10/4, -1
-
-eigen_values_0 = alpha_0 + beta_0 * eigen_values_inverse_D_A
-eigen_values = alpha + beta * eigen_values_inverse_D_A
  
+# Positions
+x_coord, y_coord = np.meshgrid(range(n_lattice), range(n_lattice)) # Create a meshgrid of coordinates
+pos = np.stack((x_coord.flatten(), y_coord.flatten()), axis=1) # Stack the coordinates in the correct shape (n_lattice*n_lattice, 2)
+
+
 
 # Create graph Data objects for each time step and save
+sample_time = [3, 4]
+for t in sample_time:
 
-for t in range(n_time):
-    # Different layer at time zero
-    if t == 0:
-        eigvals = eigen_values_0
-    else:
-        eigvals = eigen_values
+    # Mask - create vector mask which eqauls False if the value is nan and True if the value is not nan
+    mask = ~np.isnan(rho_matrix_mask[:, t]).flatten()
 
     # Create graph data object
-    graph_data = Data(x=torch.tensor(obs_matrix[:, t], dtype=torch.float).view(-1, 1),
-                              edge_index=edge_index,
-                              eigvals = torch.tensor(eigvals, dtype=torch.float))
+    graph_data = Data(
+        x=torch.tensor(obs_matrix[:, t], dtype=torch.float).view(-1, 1),
+        edge_index=edge_index,
+        pos=torch.tensor(pos, dtype=torch.float),
+        mask=torch.tensor(mask, dtype=torch.bool),
+        eigvals = torch.tensor(eigen_values_inverse_D_A, dtype=torch.float)
+    )
     
     # Save graph data object as pickle file
-    torch.save(graph_data, f'dataset/advection_diffusion/graph_data_{t}.pickle')
+    torch.save(graph_data, f'dataset/advection_diffusion/graph_y_{t}.pt')
     
 
     

@@ -4,6 +4,7 @@ import torch_geometric as ptg
 import utils
 from layers.flex import FlexLayer
 
+
 class VariationalDist(torch.nn.Module):
     def __init__(self, config, graph_y):
         super().__init__()
@@ -56,18 +57,22 @@ class VariationalDist(torch.nn.Module):
         standard_sample = torch.randn(self.n_samples, self.dim)
         ind_samples = self.std * standard_sample
 
-        self.sample_batch.x = ind_samples.reshape(-1,1) # Stack all
+        self.sample_batch.x = ind_samples.reshape(-1,1)  # Stack all
+
         for layer in self.layers:
             propagated = layer(self.sample_batch.x, self.sample_batch.edge_index,
-                    transpose=False, with_bias=False)
+                            transpose=False, with_bias=False)
             self.sample_batch.x = propagated
 
         samples = self.sample_batch.x.reshape(self.n_samples, -1)
+        
         if self.layers:
             # Apply post diagonal matrix
-            samples  = self.post_diag * samples
-        samples = samples + self.mean_param # Add mean last (not changed by layers)
-        return samples # shape (n_samples, n_nodes)
+            samples = self.post_diag * samples
+
+        samples = samples + self.mean_param  # Add mean last (not changed by layers)
+
+        return samples  # shape (n_samples, n_nodes)
 
     def log_det(self):
         layers_log_det = sum([layer.log_det() for layer in self.layers])
@@ -149,8 +154,6 @@ def vi_loss(dgmrf, vi_dist, graph_y, config):
         config["n_training_samples"]))*torch.sum(torch.pow(
             (vi_samples - graph_y.x.flatten()), 2)[:, graph_y.mask])
     
-    graph_y.x
-
     elbo = l1 + l2 + l3 + l4 + l5
     loss = (-1./graph_y.num_nodes)*elbo
     return loss

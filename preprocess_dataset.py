@@ -19,7 +19,8 @@ DATASETS = {
     "wind_cap": load_wind_cap,
     "wiki_squirrel": wiki_loader("squirrel"),
     "wiki_chameleon": wiki_loader("chameleon"),
-    "wiki_crocodile": wiki_loader("crocodile")
+    "wiki_crocodile": wiki_loader("crocodile"),
+    "advection_diffusion": load_advection_diffusion,
 }
 
 # Always on cpu
