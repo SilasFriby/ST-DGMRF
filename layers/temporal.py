@@ -1,17 +1,16 @@
 import torch
-import torch.nn as nn
 
-class TemporalLayer(nn.Module):
+class TemporalLayer(torch.nn.Module):
     def __init__(self, config):
         super(TemporalLayer, self).__init__()
         self.n_lattice = config['n_lattice']
         self.n_samples = config['n_training_samples']
         
         # Learnable parameters
-        self.d = nn.Parameter(torch.sqrt(torch.tensor(0.01)))  # d^l, initialized to sqrt(0.01)
-        self.v1 = nn.Parameter(torch.tensor(-0.3))  # v1^l, initialized to -0.3
-        self.v2 = nn.Parameter(torch.tensor(0.3))  # v2^l, initialized to 0.3
-        self.b_f = nn.Parameter(torch.tensor(0.0))  # b_f^l, initialized to 0
+        self.d = torch.nn.Parameter(torch.sqrt(torch.tensor(0.01)))  # d^l, initialized to sqrt(0.01)
+        self.v1 = torch.nn.Parameter(torch.tensor(-0.3))  # v1^l, initialized to -0.3
+        self.v2 = torch.nn.Parameter(torch.tensor(0.3))  # v2^l, initialized to 0.3
+        self.b_f = torch.nn.Parameter(torch.tensor(0.0))  # b_f^l, initialized to 0
 
     def forward(self, x):
         n_samples = self.n_samples

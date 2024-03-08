@@ -9,6 +9,7 @@ import pickle
 import argparse
 import wandb
 import copy
+from tqdm import tqdm
 
 from lib.cg_batch import cg_batch
 import visualization as vis
@@ -61,8 +62,8 @@ def get_config():
     parser.add_argument("--log_det_method", type=str, default="eigvals",
         help="Method for log-det. computations (eigvals/dad), dad is using power series")
     parser.add_argument("--n_iterations", type=int,
-            help="How many iterations to train for", default=1000) #1000
-    parser.add_argument("--val_interval", type=int, default=100, #100
+            help="How many iterations to train for", default=100) #1000
+    parser.add_argument("--val_interval", type=int, default=10, #100
             help="Evaluate model every val_interval:th iteration")
     parser.add_argument("--n_training_samples", type=int, default=2, #10
         help="Number of samples to use for each iteration in training")
@@ -133,33 +134,51 @@ def main():
     # Set all random seeds
     seed_all(config["seed"])
 
-    # Device setup
-    if torch.cuda.is_available():
-        # Make all tensors created go to GPU
-        torch.set_default_tensor_type(torch.cuda.FloatTensor)
+    # # Device setup
+    # if torch.cuda.is_available():
+    #     # Make all tensors created go to GPU
+    #     torch.set_default_tensor_type(torch.cuda.FloatTensor)
 
-        # For reproducability on GPU
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+    #     # For reproducability on GPU
+    #     torch.backends.cudnn.deterministic = True
+    #     torch.backends.cudnn.benchmark = False
+
+    if torch.backends.mps.is_available():
+        torch.set_default_device('mps')
 
     # Load data
     dataset_dict = utils.load_dataset(config["dataset"])
+    
+    # Initialize spatial graph using the first time step - all time steps have the same spatial graph 
+    graph_y = dataset_dict["graph_y_0"]
 
-    # Initialize optimal parameters tuple
+    # Instantiate models and variational distribution
+    temporal_model = TemporalModel(config)
+    dgmrf = DGMRF(graph_y, config)
+    vi_dist = vi.VariationalDist(config, graph_y)
+
+    # Initialize optimal parameters
     opt_params = ()
+
+    # Add temporal, spatial and variational parameters to opt_params
+    opt_params += tuple(temporal_model.parameters())
+    opt_params += tuple(dgmrf.parameters())
+    opt_params += tuple(vi_dist.parameters())
 
     # Add noise std to opt_param if learn_noise_std == 1
     config["log_noise_std"] = torch.log(torch.tensor(config["noise_std"]))
     if config["learn_noise_std"]:
         # Initalize using noise_std in config
         config["log_noise_std"] = torch.nn.parameter.Parameter(config["log_noise_std"])
-        opt_params = (config["log_noise_std"],)
+        opt_params += (config["log_noise_std"],)
 
     # Set optimizer for stochastic gradient descent algorithm
-    opt = utils.get_optimizer(config["optimizer"])(opt_params, lr=config["lr"])
+    optimizer = utils.get_optimizer(config["optimizer"])(opt_params, lr=config["lr"])
     
-    # Initialize total loss
+    # Initialize loss variables
     total_loss = torch.zeros(1)
+    elbo = torch.zeros(1)
+    loss = torch.zeros(1)
 
     # Training loop
     best_loss = None
@@ -167,8 +186,9 @@ def main():
 
     for iteration_i in range(config["n_iterations"]):
         
-        # Reset gradients to zero
-        opt.zero_grad()
+        optimizer.zero_grad()
+
+        elbo = torch.zeros(1)
 
         for k in range(config["n_time"]):
 
@@ -176,33 +196,10 @@ def main():
 
             # Graph data
             graph_y = dataset_dict["graph_y_" + str(k)]
-
-            # Masked data
-            val_mask = torch.logical_not(graph_y.mask) # True for unobserved nodes
             graph_y.n_observed = torch.sum(graph_y.mask).to(torch.float32)
-            graph_y.n_unobserved = torch.sum(val_mask).to(torch.float32)
 
 
-            ## Temporal and spatial models
-
-            # Instatiate temporal model
-            temporal_model = TemporalModel(config)
-
-            # Instatiate spatial model
-            dgmrf = DGMRF(graph_y, config)
-
-            # Add temporal model and spatial model parameters to opt_params
-            opt_params += tuple(temporal_model.parameters())
-            opt_params += tuple(dgmrf.parameters())
-
-
-            ## Train using variational distribution - i.e use ELBO as loss
-
-            # Instatiate variational distribution
-            vi_dist = vi.VariationalDist(config, graph_y)
-
-            # Add variational distribution parameters to opt_params
-            opt_params += tuple(vi_dist.parameters())
+            ## Train using variational distribution - i.e compute ELBO and use as loss function
 
             # Sample from variational distribution
             vi_samples = vi_dist.sample()
@@ -212,77 +209,110 @@ def main():
             vi_samples_temporal_batch_format = vi_samples.unsqueeze(2)
 
             # Feed samples through temporal model
-            vi_samples_temporal_transform = temporal_model(vi_samples_temporal_batch_format)
-            print(vi_samples_temporal_transform.shape)
+            h_k = temporal_model(vi_samples_temporal_batch_format)
 
             # Prepare vi samples after temporal transform for batched spatial model
-            vi_dist.sample_batch.x = vi_samples_temporal_transform.reshape(-1,1)
+            vi_dist.sample_batch.x = h_k.reshape(-1,1)
 
             # Feed samples through spatial model
-            vi_samples_temporal_spatial_transform = dgmrf(vi_dist.sample_batch)
+            g_k = dgmrf(vi_dist.sample_batch)
 
             # Compute log determinant of variational distribution
             vi_log_det = vi_dist.log_det()
 
-            # Construct loss
-            l1 = 0.5*vi_log_det
-            l2 = -graph_y.n_observed*config["log_noise_std"]
+            # Compute ELBO components for time step k
+            l1 = 0.5 * vi_log_det
+            l2 = -graph_y.n_observed * config["log_noise_std"]
             l3 = dgmrf.log_det()
-            l4 = -(1./(2. * config["n_training_samples"])) * torch.sum(torch.pow(g,2))
+            l4 = -(1./(2. * config["n_training_samples"])) * torch.sum(torch.pow(g_k,2))
             l5 = -(1./(2. * utils.noise_var(config)*\
-                config["n_training_samples"]))*torch.sum(torch.pow(
+                config["n_training_samples"])) * torch.sum(torch.pow(
                     (vi_samples - graph_y.x.flatten()), 2)[:, graph_y.mask])
             
-            elbo = l1 + l2 + l3 + l4 + l5
-            loss = (-1./graph_y.num_nodes)*elbo
+            # If additional features are being used - I HAVE NOT CHECKED IF THIS WORKS CORRECTLY FOR SPATIAL-TEMPORAL MODEL!!
+            if config["features"]:
+                vi_coeff_samples = vi_dist.sample_coeff(config["n_training_samples"])
+                # Mean from a VI sample (x + linear feature model)
+                vi_samples += vi_coeff_samples @ graph_y.features.transpose(0,1)
 
-        # loss = vi.vi_loss(dgmrf, vi_dist, graph_y, config)
+                # Added term when using additional features
+                vi_coeff_log_det = vi_dist.log_det_coeff()
+                entropy_term = 0.5*vi_coeff_log_det
+                ce_term = vi_dist.ce_coeff()
 
-        # # Train
-        # loss.backward()
-        # opt.step()
+                l1 = l1 + entropy_term
+                l4 = l4 + ce_term
+            
+            # Update ELBO
+            elbo += l1 + l2 + l3 + l4 + l5
 
+        # Compute normalized loss for this iteration
+        n_nodes = graph_y.num_nodes * config["n_time"]
+        loss = (-1. / n_nodes) * elbo
+        
+        # Backpropagation
+        loss.backward()
+        optimizer.step()
+        
+        # Update total loss for reporting
         total_loss += loss.detach()
 
+        # Print progress
         if ((iteration_i+1) % config["val_interval"]) == 0:
-            # Validate
-            val_samples = vi_dist.sample()
+            # Initialize validation error accumulator
+            val_error_accum = 0.0
+            # Loop over time steps for validation
+            for k in range(config["n_time"]):
+                # Fetch the graph data for time step k
+                graph_y = dataset_dict["graph_y_" + str(k)]
 
-            if config["features"]:
-                # Just sample coefficients again (independent of vi x samples)
-                vi_coeff_samples = vi_dist.sample_coeff(config["n_training_samples"])
-                val_samples = val_samples +\
-                    vi_coeff_samples@graph_y.features.transpose(0,1)
+                # Masked data for validation
+                val_mask = torch.logical_not(graph_y.mask)
+                graph_y.n_unobserved = torch.sum(val_mask).to(torch.float32)
 
-            val_error = (1./(config["n_training_samples"]*graph_y.n_unobserved))*\
-                    torch.sum(torch.pow(
-                        (val_samples - graph_y.x.flatten()), 2)[:, val_mask])
-            val_error = val_error.item()
+                # Sample from the variational distribution
+                val_samples = vi_dist.sample()
 
+                # If additional features are being used - I HAVE NOT CHECKED IF THIS WORKS CORRECTLY FOR SPATIAL-TEMPORAL MODEL!!
+                if config["features"]:
+                    # Sample coefficients and adjust validation samples
+                    vi_coeff_samples = vi_dist.sample_coeff(config["n_training_samples"])
+                    val_samples += vi_coeff_samples @ graph_y.features.transpose(0,1)
+
+                # Calculate validation error for current time step
+                val_error = (1./(config["n_training_samples"]*graph_y.n_unobserved)) *\
+                            torch.sum(torch.pow((val_samples - graph_y.x.flatten()), 2)[:, val_mask])
+                val_error_accum += val_error.item()
+
+            # Average validation error over time steps
+            mean_val_error = val_error_accum / config["n_time"]
+
+            # Compute mean loss over interval
             mean_loss = (total_loss.item() / config["val_interval"])
             total_loss = torch.zeros(1)
 
-            print("Iteration: {}, loss: {:.6}, val_error: {}".format(
-                (iteration_i+1), mean_loss, val_error))
+            print("Iteration: {}, mean loss: {:.6}, mean val error: {:.6}".format(
+                (iteration_i+1), mean_loss, mean_val_error))
 
-            # wandb.log({
-            #     "loss": mean_loss,
-            #     "val_error": val_error,
-            #     "iteration": (iteration_i+1),
-            #     "noise_std": utils.noise_std(config),
-            # })
-
-            # Save best params
-            if (best_loss == None) or (mean_loss < best_loss):
-                best_params = copy.deepcopy(dgmrf.state_dict())
+            # Save best parameters based on validation error
+            if (best_loss is None) or (mean_loss < best_loss):
+                best_temporal_params = copy.deepcopy(temporal_model.state_dict())  
+                best_spatial_params = copy.deepcopy(dgmrf.state_dict())
                 best_loss = mean_loss
 
             if config["print_params"]:
-                utils.print_params(dgmrf, config, "--- Model parameters ---")
+                # Print parameters of both temporal and spatial models
+                utils.print_params(temporal_model, config, "--- Temporal Model parameters ---")
+                utils.print_params(dgmrf, config, "--- Spatial Model parameters ---")
+
 
     # Reload best parameters
-    dgmrf.load_state_dict(best_params)
-    utils.print_params(dgmrf, config, "Final parameters:")
+    temporal_model.load_state_dict(best_temporal_params)
+    dgmrf.load_state_dict(best_spatial_params)
+    
+    # # Print final parameters 
+    # utils.print_params(dgmrf, config, "Final DGMRF parameters:")
+    # utils.print_params(temporal_model, config, "Final Temporal Model parameters:")
 
     # Plot y
     vis.plot_graph(graph_y, name="y", title="y")

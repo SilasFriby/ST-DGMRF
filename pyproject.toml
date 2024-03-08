@@ -19,6 +19,11 @@ torch-geometric = "^2.5.0"
 igraph = "^0.11.4"
 
 
+[[tool.poetry.source]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/nightly/cpu"
+priority = "explicit"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

@@ -1,7 +1,7 @@
-import torch.nn as nn
+import torch
 from layers.temporal import TemporalLayer
 
-class TemporalModel(nn.Module):
+class TemporalModel(torch.nn.Module):
     def __init__(self, config):
         super(TemporalModel, self).__init__()
 
@@ -10,7 +10,7 @@ class TemporalModel(nn.Module):
         for _ in range(config['n_layers_temporal']):
             layer_list.append(TemporalLayer(config))
 
-        self.layers = nn.ModuleList(layer_list)
+        self.layers = torch.nn.ModuleList(layer_list)
 
     def forward(self, x):
         # Sequentially apply each layer to the data
