@@ -77,7 +77,7 @@ def new_graph(like_graph, new_x=None):
     graph.x = new_x
     return graph
 
-def print_params(model, config, header=None):
+def print_params(model, config, model_type, header=None):
     if header:
         print(header)
 
@@ -85,20 +85,18 @@ def print_params(model, config, header=None):
     for param_name, param_value in model.state_dict().items():
         print("{}: {}".format(param_name, param_value))
 
-    print("Aggregation weights:")
-    for layer_i, layer in enumerate(model.layers):
-        print("Layer {}".format(layer_i))
-        if hasattr(layer, "activation_weight"):
-            print("non-linear weight: {:.4}".format(layer.activation_weight.item()))
-        else:
-            print("self: {:.4}, neighbor: {:.4}".format(
-                layer.self_weight[0].item(), layer.neighbor_weight[0].item()))
+    if model_type == "spatial":
+        print("Aggregation weights:")
+        for layer_i, layer in enumerate(model.layers):
+            print("Layer {}".format(layer_i))
+            if hasattr(layer, "activation_weight"):
+                print("non-linear weight: {:.4}".format(layer.activation_weight.item()))
+            else:
+                print("self: {:.4}, neighbor: {:.4}".format(
+                    layer.self_weight[0].item(), layer.neighbor_weight[0].item()))
 
-        if hasattr(layer, "degree_power"):
-            print("degree power: {:.4}".format(layer.degree_power[0].item()))
-
-    if config["learn_noise_std"]:
-        print("noise_std: {}".format(noise_std(config)))
+            if hasattr(layer, "degree_power"):
+                print("degree power: {:.4}".format(layer.degree_power[0].item()))
 
 def noise_var(config):
     return torch.exp(2.*config["log_noise_std"])

@@ -7,6 +7,7 @@ class LinearLayer(ptg.nn.MessagePassing):
         super(LinearLayer, self).__init__(aggr="add")
 
         self.num_nodes = graph.num_nodes
+        
         # in/out degree doesn't matter, undirected graph
         self.degrees = ptg.utils.degree(graph.edge_index[0])
 
@@ -34,7 +35,6 @@ class LinearLayer(ptg.nn.MessagePassing):
 
     def forward(self, x, edge_index, transpose, with_bias):
         weighted_repr = self.weight_self_representation(x)
-
         aggr = (self.self_weight * weighted_repr) + (self.neighbor_weight*self.propagate(
             edge_index, x=x, transpose=transpose)) # Shape (n_nodes*n_graphs,1)
 

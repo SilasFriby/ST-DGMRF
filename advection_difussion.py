@@ -246,8 +246,7 @@ pos = np.stack((x_coord.flatten(), y_coord.flatten()), axis=1) # Stack the coord
 
 
 # Create graph Data objects for each time step and save
-sample_time = [3, 4]
-for t in sample_time:
+for t in range(n_time):
 
     # Mask - create vector mask which eqauls False if the value is nan and True if the value is not nan
     mask = ~np.isnan(rho_matrix_mask[:, t]).flatten()

@@ -26,6 +26,21 @@ def get_config():
     # If config file should be used
     parser.add_argument("--config", type=str, help="Config file to read run config from")
 
+
+    # Arguments of importance
+    parser.add_argument("--n_layers", type=int,
+                    help="Number of message passing layers", default=2) 
+    parser.add_argument("--n_layers_temporal", type=float, default=4,
+        help="Number of layers in temporal model")
+    parser.add_argument("--n_iterations", type=int,
+        help="How many iterations to train for", default=10**3) #1000
+    parser.add_argument("--n_training_samples", type=int, default=10**1, #10
+        help="Number of samples to use for each iteration in training")
+    parser.add_argument("--sample_times_start", type=float, default=3,
+        help="Start sample time")
+    parser.add_argument("--sample_times_end", type=float, default=4,
+        help="End sample time")
+
     # General
     parser.add_argument("--dataset", type=str, default="advection_diffusion", #"toy_gmrf42_random", #
             help="Which dataset to use")
@@ -45,8 +60,6 @@ def get_config():
             help="Inverse standard deviation of coefficients beta (feature weights)")
 
     # Model Architecture
-    parser.add_argument("--n_layers", type=int,
-                        help="Number of message passing layers", default=1) 
     parser.add_argument("--use_bias", type=int, default=1,
                         help="Use bias parameter in layers")
     parser.add_argument("--non_linear", type=int, default=0,
@@ -61,15 +74,11 @@ def get_config():
     # Training
     parser.add_argument("--log_det_method", type=str, default="eigvals",
         help="Method for log-det. computations (eigvals/dad), dad is using power series")
-    parser.add_argument("--n_iterations", type=int,
-            help="How many iterations to train for", default=100) #1000
-    parser.add_argument("--val_interval", type=int, default=10, #100
-            help="Evaluate model every val_interval:th iteration")
-    parser.add_argument("--n_training_samples", type=int, default=2, #10
-        help="Number of samples to use for each iteration in training")
     parser.add_argument("--lr", type=float,
             help="Learning rate", default=0.01)
-    parser.add_argument("--vi_layers", type=int, default=1, #0
+    parser.add_argument("--val_interval", type=int, default=10**2, #100
+            help="Evaluate model every val_interval:th iteration")
+    parser.add_argument("--vi_layers", type=int, default=1,
         help="Flex-layers to apply to independent vi-samples to introduce correlation")
 
     # Posterior inference
@@ -93,10 +102,10 @@ def get_config():
     # Temporal
     parser.add_argument("--n_lattice", type=int, default=30,
         help="Number of lattice points in each dimension")
-    parser.add_argument("--n_time", type=float, default=2,
+    parser.add_argument("--n_time", type=float, default=20,
         help="Number of time steps")
-    parser.add_argument("--n_layers_temporal", type=float, default=1,
-        help="Number of layers in temporal model")
+    
+    
 
     args = parser.parse_args()
     config = vars(args)
@@ -134,17 +143,14 @@ def main():
     # Set all random seeds
     seed_all(config["seed"])
 
-    # # Device setup
-    # if torch.cuda.is_available():
-    #     # Make all tensors created go to GPU
-    #     torch.set_default_tensor_type(torch.cuda.FloatTensor)
+    # Device setup
+    if torch.cuda.is_available():
+        # Make all tensors created go to GPU
+        torch.set_default_tensor_type(torch.cuda.FloatTensor)
 
-    #     # For reproducability on GPU
-    #     torch.backends.cudnn.deterministic = True
-    #     torch.backends.cudnn.benchmark = False
-
-    if torch.backends.mps.is_available():
-        torch.set_default_device('mps')
+        # For reproducability on GPU
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
     # Load data
     dataset_dict = utils.load_dataset(config["dataset"])
@@ -182,20 +188,32 @@ def main():
 
     # Training loop
     best_loss = None
-    best_params = None
+    best_temporal_params = None
+    best_spatial_params = None
+
+    # Time points
+    if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
+        n_time = config["sample_times_end"] - config["sample_times_start"] + 1
+    else:
+        n_time = config["n_time"]
+
+    # Start timing
+    start_time = time.time()  
 
     for iteration_i in range(config["n_iterations"]):
-        
-        optimizer.zero_grad()
 
+        optimizer.zero_grad()
         elbo = torch.zeros(1)
 
-        for k in range(config["n_time"]):
+        for k in range(n_time):
 
             ## Data
 
             # Graph data
-            graph_y = dataset_dict["graph_y_" + str(k)]
+            if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
+                graph_y = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
+            else:
+                graph_y = dataset_dict["graph_y_" + str(k)]
             graph_y.n_observed = torch.sum(graph_y.mask).to(torch.float32)
 
 
@@ -280,9 +298,10 @@ def main():
                     val_samples += vi_coeff_samples @ graph_y.features.transpose(0,1)
 
                 # Calculate validation error for current time step
-                val_error = (1./(config["n_training_samples"]*graph_y.n_unobserved)) *\
-                            torch.sum(torch.pow((val_samples - graph_y.x.flatten()), 2)[:, val_mask])
-                val_error_accum += val_error.item()
+                if not graph_y.n_unobserved == 0:
+                    val_error = (1./(config["n_training_samples"]*graph_y.n_unobserved)) *\
+                                torch.sum(torch.pow((val_samples - graph_y.x.flatten()), 2)[:, val_mask])
+                    val_error_accum += val_error.item()
 
             # Average validation error over time steps
             mean_val_error = val_error_accum / config["n_time"]
@@ -306,13 +325,28 @@ def main():
                 utils.print_params(dgmrf, config, "--- Spatial Model parameters ---")
 
 
+    # Summary
+    print("n_spatial_layers: ", config["n_layers"])
+    print("n_temporal_layers: ", config["n_layers_temporal"])
+    print("n_iterations: ", config["n_iterations"])
+    print("n_training_samples: ", config["n_training_samples"])
+    print("Iteration: {}, mean loss: {:.6}, mean val error: {:.6}".format(
+        (iteration_i+1), mean_loss, mean_val_error))
+    
+    # End timing
+    current_time = time.time()
+    elapsed_time = (current_time - start_time) / 60
+    print(f"Computation time: {elapsed_time:.2f} minutes")
+
     # Reload best parameters
     temporal_model.load_state_dict(best_temporal_params)
     dgmrf.load_state_dict(best_spatial_params)
     
-    # # Print final parameters 
-    # utils.print_params(dgmrf, config, "Final DGMRF parameters:")
-    # utils.print_params(temporal_model, config, "Final Temporal Model parameters:")
+    # Print final parameters 
+    utils.print_params(dgmrf, config, model_type="spatial", header="Final Spatial Model Parameters:")
+    utils.print_params(temporal_model, config, model_type="temporal", header="Final Temporal Model Parameters:")
+    if config["learn_noise_std"]:
+        print("noise_std: {}".format(utils.noise_std(config)))
 
     # Plot y
     vis.plot_graph(graph_y, name="y", title="y")
@@ -374,8 +408,6 @@ def main():
 
         print("MAE of posterior mean: {:.7}".format(mean_mae))
         print("MAE of posterior std.-dev.: {:.7}".format(std_mae))
-        wandb.run.summary["mean_mae"] = mean_mae
-        wandb.run.summary["std_mae"] = std_mae
 
     # Compare posterior mean with y
     diff = (graph_post_mean.x - graph_y.x)[inverse_mask, :]
