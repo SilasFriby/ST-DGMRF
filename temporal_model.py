@@ -12,10 +12,10 @@ class TemporalModel(torch.nn.Module):
 
         self.layers = torch.nn.ModuleList(layer_list)
 
-    def forward(self, x):
+    def forward(self, x, batch_run=True, n_samples=None):
         # Sequentially apply each layer to the data
         for layer in self.layers:
-                x = layer(x)
+                x = layer(x, batch_run, n_samples) 
         return x
 
 

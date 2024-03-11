@@ -105,6 +105,12 @@ def get_config():
     parser.add_argument("--n_time", type=float, default=20,
         help="Number of time steps")
     
+    # Extra assumptions
+    parser.add_argument("--temporal_time_invariance", type=int, default=1, # Note spatial time invariance is always assumed, see section 3.2.1 "... K + 1 independent DGMRFs..."
+        help="If the transition matrix should be time-invariant")
+    
+    
+    
     
 
     args = parser.parse_args()
@@ -348,23 +354,23 @@ def main():
     if config["learn_noise_std"]:
         print("noise_std: {}".format(utils.noise_std(config)))
 
-    # Plot y
-    vis.plot_graph(graph_y, name="y", title="y")
+    # # Plot y
+    # vis.plot_graph(graph_y, name="y", title="y")
 
     # Plot VI
     vi_evaluation = config["vi_eval"] or config["non_linear"]
-    if config["plot_vi_samples"]:
-        graph_vi_sample = utils.new_graph(graph_y)
-        vi_samples = vi_dist.sample()[:config["plot_vi_samples"]]
-        # VI samples plotted when using features are only x (without linear model)
-        for sample_i, vi_sample in enumerate(vi_samples.detach()):
-            graph_vi_sample.x = vi_sample.unsqueeze(1)
-            vis.plot_graph(graph_vi_sample, show=True, name="vi_sample",
-                    title="VI Sample {}".format(sample_i))
-    if not vi_evaluation:
-        graph_vi_mean, graph_vi_std = vi_dist.posterior_estimate(graph_y, config)
-        vis.plot_graph(graph_vi_mean, name="vi_mean", title="VI Mean")
-        vis.plot_graph(graph_vi_std, name="vi_std_dev", title="VI Std-dev.")
+    # if config["plot_vi_samples"]:
+    #     graph_vi_sample = utils.new_graph(graph_y)
+    #     vi_samples = vi_dist.sample()[:config["plot_vi_samples"]]
+    #     # VI samples plotted when using features are only x (without linear model)
+    #     for sample_i, vi_sample in enumerate(vi_samples.detach()):
+    #         graph_vi_sample.x = vi_sample.unsqueeze(1)
+    #         vis.plot_graph(graph_vi_sample, show=True, name="vi_sample",
+    #                 title="VI Sample {}".format(sample_i))
+    # if not vi_evaluation:
+    #     graph_vi_mean, graph_vi_std = vi_dist.posterior_estimate(graph_y, config)
+    #     vis.plot_graph(graph_vi_mean, name="vi_mean", title="VI Mean")
+    #     vis.plot_graph(graph_vi_std, name="vi_std_dev", title="VI Std-dev.")
 
     # Posterior inference
     if hasattr(graph_y, "adj_matrix"):
