@@ -33,8 +33,8 @@ def get_config():
     parser.add_argument("--n_layers_temporal", type=float, default=4,
         help="Number of layers in temporal model")
     parser.add_argument("--n_iterations", type=int,
-        help="How many iterations to train for", default=10**3) #1000
-    parser.add_argument("--n_training_samples", type=int, default=10**1, #10
+        help="How many iterations to train for", default=1) #1000
+    parser.add_argument("--n_training_samples", type=int, default=1, #10
         help="Number of samples to use for each iteration in training")
     parser.add_argument("--sample_times_start", type=float, default=3,
         help="Start sample time")
@@ -104,13 +104,6 @@ def get_config():
         help="Number of lattice points in each dimension")
     parser.add_argument("--n_time", type=float, default=20,
         help="Number of time steps")
-    
-    # Extra assumptions
-    parser.add_argument("--temporal_time_invariance", type=int, default=1, # Note spatial time invariance is always assumed, see section 3.2.1 "... K + 1 independent DGMRFs..."
-        help="If the transition matrix should be time-invariant")
-    
-    
-    
     
 
     args = parser.parse_args()
@@ -282,7 +275,7 @@ def main():
         total_loss += loss.detach()
 
         # Print progress
-        if ((iteration_i+1) % config["val_interval"]) == 0:
+        if 0 == 0: #((iteration_i+1) % config["val_interval"]) == 0:
             # Initialize validation error accumulator
             val_error_accum = 0.0
             # Loop over time steps for validation
@@ -385,8 +378,11 @@ def main():
     else:
         # Exact posterior inference
         print("Running posterior inference ...")
-        graph_post_mean, graph_post_std = inference.posterior_inference(dgmrf,
-                graph_y, config)
+        # graph_post_mean, graph_post_std = inference.posterior_inference(dgmrf,
+        #         graph_y, config)
+        post_mean = inference.posterior_inference(temporal_model, dgmrf, config, 
+                                                  graph_y, n_time, dataset_dict)
+
 
     # Plot posterior
     vis.plot_graph(graph_post_mean, name="post_mean", title="Posterior Mean")

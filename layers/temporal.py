@@ -12,10 +12,13 @@ class TemporalLayer(torch.nn.Module):
         self.v2 = torch.nn.Parameter(torch.tensor(0.3))  # v2^l, initialized to 0.3
         self.b_f = torch.nn.Parameter(torch.tensor(0.0))  # b_f^l, initialized to 0
 
-    def forward(self, x, batch_run=True, n_samples=None):
+    def forward(self, x, with_bias=True, overwrite_n_samples=None):
         
-        if batch_run:
+        if overwrite_n_samples is None:
             n_samples = self.n_samples
+        else:
+            n_samples = overwrite_n_samples
+            
 
         # Create identity matrix with batch dimension
         identity_matrix = torch.eye(self.n_lattice**2, dtype=x.dtype).unsqueeze(0).repeat(n_samples, 1, 1)
@@ -30,9 +33,13 @@ class TemporalLayer(torch.nn.Module):
         F = identity_matrix + M 
 
         # Batch matrix multiplication
-        result = torch.bmm(F, x) + self.b_f 
-       
+        result = torch.bmm(F, x)
 
+        # Add bias
+        if with_bias:
+            result += self.b_f
+       
+        # Return result
         return result
 
     def get_neighbor_nodes(self, node):
