@@ -11,18 +11,17 @@ def get_bias(dgmrf, graph_y):
     return bias
 
 # Regularized CG from section B.4
-def regularized_cg(A_bmm, B, x0, nu=10.0, rtol=1e-7, max_outer_iter=100, max_inner_iter=200, nu_decay_factor=10, verbose=False):
+def regularized_cg(A_func, B, x0, nu0=10.0, rtol=1e-7, max_outer_iter=100, max_inner_iter=200, nu_decay_factor=10.0, verbose=False):
     
-    # Initialize variables
+    # Initial guess
     x = x0 
-    r = B.clone()  # Initial residual
-    n_nodes = B.size(1)
+    nu = nu0
 
     ## Solve the regularized linear system (νI + A)x = νx^(i) + b
     
     # Left-hand side
     def lhs(x, nu):
-        return nu * x + A_bmm(x)
+        return nu * x + A_func(x)
 
     # Right-hand side        
     def rhs(x, nu): 
@@ -32,30 +31,30 @@ def regularized_cg(A_bmm, B, x0, nu=10.0, rtol=1e-7, max_outer_iter=100, max_inn
     for outer_iter in range(max_outer_iter):
 
         # Use the standard CG method to solve the regularized system
-        solution, cg_info = cg_batch(A_bmm=lambda x: lhs(x, nu = nu), B=rhs(x, nu), rtol=rtol, verbose=verbose)
+        solution, cg_info = cg_batch(A_bmm=lambda x: lhs(x, nu = nu), B=rhs(x, nu), rtol=rtol, maxiter=max_inner_iter, verbose=verbose)
         
         # Optionally print CG information
         if verbose:
             print("Outer iteration {}: CG finished in {} iterations, solution optimal: {}".format(
                 outer_iter, cg_info["niter"], cg_info["optimal"]))
         
-        # Decrease nu every 10 iterations by the decay factor
-        if outer_iter > 0 and outer_iter % 10 == 0:
-            nu /= nu_decay_factor
-            
-        # Check for convergence
-        r = lhs(x=solution, nu=nu) - rhs(x=solution, nu=nu)  
-        if torch.norm(r) < rtol or cg_info["niter"] >= max_inner_iter:
-            break  # Convergence or max iterations reached
-
         # Update x
         x = solution
+
+        # Decrease nu every 10 iterations by the decay factor
+        if outer_iter % 10 == 0:
+            nu /= nu_decay_factor
+            
+        # Check for convergence or max iterations reached
+        residuals = lhs(x=solution, nu=nu) - rhs(x=solution, nu=nu)  
+        if torch.norm(residuals) < rtol:
+            break   
 
     return x
 
 
 # Solve Q_tilde x = rhs using Conjugate Gradient
-def cg_solve(rhs, temporal_model, dgmrf, graph_y, config, n_time, dataset_dict, rtol, verbose=False):
+def cg_solve(rhs, temporal_model, dgmrf, graph_y, config, n_time, dataset_dict, rtol, cg_start_guess, verbose=False):
     
     # Number of nodes
     n_nodes_spatial = graph_y.num_nodes
@@ -196,24 +195,11 @@ def cg_solve(rhs, temporal_model, dgmrf, graph_y, config, n_time, dataset_dict, 
     
     ## Regularized CG
 
-    v = torch(10)
-    for i in range(max_outer_iter):
-        r = v 
-
-    solution, cg_info = cg_batch(A_bmm=Q_tilde_batched, B=rhs, rtol=rtol, verbose=verbose)
-    solution = regularized_cg(A_bmm=Q_tilde_batched, B=rhs, x0, nu, rtol, max_outer_iter=100, max_inner_iter=200, nu_decay_factor=10, verbose=False)
-
-    if verbose:
-        print("CG finished in {} iterations, solution optimal: {}".format(
-            cg_info["niter"], cg_info["optimal"]))
+    # solution, cg_info = cg_batch(A_bmm=Q_tilde_batched, B=rhs, rtol=rtol, verbose=verbose)
+    solution = regularized_cg(A_func=Q_tilde_batched, B=rhs, x0=cg_start_guess, rtol = rtol, verbose=verbose)
 
     return solution.to(torch.float32)
 
-
-def cg_solve_regularized(max_outer_iter, max_inner_iter, rhs, temporal_model, dgmrf, graph_y, config, n_time, dataset_dict, rtol, verbose=False):
-
-    for i in range(max_outer_iter):
-        r = 
 
 
 @torch.no_grad()
@@ -255,7 +241,7 @@ def sample_posterior(n_samples, dgmrf, graph_y, config, rtol, verbose=False):
     return samples
 
 @torch.no_grad()
-def posterior_inference(temporal_model, dgmrf, config, graph_y, n_time, dataset_dict):
+def posterior_inference(temporal_model, dgmrf, vi_dist, config, graph_y, n_time, dataset_dict):
     
     #### Posterior mean
     #### RHS consists of Omega @ mu + (1 / sigma ^ 2) * y_masked, where Omega @ mu = = F^T @ Q @ c = F^T @ S^T @ S @ c
@@ -366,8 +352,22 @@ def posterior_inference(temporal_model, dgmrf, config, graph_y, n_time, dataset_
             
     mean_rhs = Omega_mu + (1./utils.noise_var(config)) * masked_y
 
-    post_mean = cg_solve(mean_rhs.unsqueeze(0), temporal_model, dgmrf, graph_y, config, 
-                         n_time, dataset_dict, config["inference_rtol"], verbose=True)[0]
+    ## CG Solve
+
+     # Initial guess - use mean of VI distribution. Note the r=use of 'repeat' is ONLY CORRECT WHEN VI IS TIME-INVARIANT !!!!
+    cg_start_guess_batch = vi_dist.mean_param.repeat(n_time).unsqueeze(0).unsqueeze(2) # unsqueeze dimensions necessary for cg_batch function
+    
+    # Posterior mean
+    post_mean = cg_solve(rhs = mean_rhs.unsqueeze(0), 
+                         temporal_model=temporal_model, 
+                         dgmrf=dgmrf, 
+                         graph_y=graph_y, 
+                         config=config, 
+                         n_time=n_time, 
+                         dataset_dict=dataset_dict, 
+                         rtol=config["inference_rtol"], 
+                         cg_start_guess=cg_start_guess_batch,
+                         verbose=True)[0]
     
     # graph_post_mean = utils.new_graph(graph_y, new_x=post_mean)
 

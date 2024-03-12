@@ -316,6 +316,7 @@ def main():
             if (best_loss is None) or (mean_loss < best_loss):
                 best_temporal_params = copy.deepcopy(temporal_model.state_dict())  
                 best_spatial_params = copy.deepcopy(dgmrf.state_dict())
+                best_vi_params = copy.deepcopy(vi_dist.state_dict())
                 best_loss = mean_loss
 
             if config["print_params"]:
@@ -324,28 +325,29 @@ def main():
                 utils.print_params(dgmrf, config, "--- Spatial Model parameters ---")
 
 
-    # Summary
-    print("n_spatial_layers: ", config["n_layers"])
-    print("n_temporal_layers: ", config["n_layers_temporal"])
-    print("n_iterations: ", config["n_iterations"])
-    print("n_training_samples: ", config["n_training_samples"])
-    print("Iteration: {}, mean loss: {:.6}, mean val error: {:.6}".format(
-        (iteration_i+1), mean_loss, mean_val_error))
+    # # Summary
+    # print("n_spatial_layers: ", config["n_layers"])
+    # print("n_temporal_layers: ", config["n_layers_temporal"])
+    # print("n_iterations: ", config["n_iterations"])
+    # print("n_training_samples: ", config["n_training_samples"])
+    # print("Iteration: {}, mean loss: {:.6}, mean val error: {:.6}".format(
+    #     (iteration_i+1), mean_loss, mean_val_error))
     
     # End timing
     current_time = time.time()
     elapsed_time = (current_time - start_time) / 60
-    print(f"Computation time: {elapsed_time:.2f} minutes")
+    print(f"Computation time for Stochastic Gradient Descent method: {elapsed_time:.2f} minutes")
 
     # Reload best parameters
     temporal_model.load_state_dict(best_temporal_params)
     dgmrf.load_state_dict(best_spatial_params)
+    vi_dist.load_state_dict(best_vi_params)
     
-    # Print final parameters 
-    utils.print_params(dgmrf, config, model_type="spatial", header="Final Spatial Model Parameters:")
-    utils.print_params(temporal_model, config, model_type="temporal", header="Final Temporal Model Parameters:")
-    if config["learn_noise_std"]:
-        print("noise_std: {}".format(utils.noise_std(config)))
+    # # Print final parameters 
+    # utils.print_params(dgmrf, config, model_type="spatial", header="Final Spatial Model Parameters:")
+    # utils.print_params(temporal_model, config, model_type="temporal", header="Final Temporal Model Parameters:")
+    # if config["learn_noise_std"]:
+    #     print("noise_std: {}".format(utils.noise_std(config)))
 
     # # Plot y
     # vis.plot_graph(graph_y, name="y", title="y")
@@ -380,14 +382,33 @@ def main():
         print("Running posterior inference ...")
         # graph_post_mean, graph_post_std = inference.posterior_inference(dgmrf,
         #         graph_y, config)
-        post_mean = inference.posterior_inference(temporal_model, dgmrf, config, 
-                                                  graph_y, n_time, dataset_dict)
+
+        # Start timing
+        start_time = time.time() 
+
+        post_mean = inference.posterior_inference(temporal_model=temporal_model, 
+                                                  dgmrf=dgmrf, 
+                                                  vi_dist=vi_dist,
+                                                  config=config, 
+                                                  graph_y=graph_y, 
+                                                  n_time=n_time, 
+                                                  dataset_dict=dataset_dict)
+        
+        # End timing
+        current_time = time.time()
+        elapsed_time = (current_time - start_time) / 60
+        print(f"Computation time for CG method: {elapsed_time:.2f} minutes")
+
+    # NEXT UP: 
+    # (1) Compute true posterior mean and std.-dev. for comparison - perhaps best to do so in advection_diffusion.py to include it in the dataset_dict
+    # (2) Compute metrics for evaluation - RMSE, CRPS, INT
+        
 
 
-    # Plot posterior
-    vis.plot_graph(graph_post_mean, name="post_mean", title="Posterior Mean")
-    vis.plot_graph(graph_post_std, name="post_std",
-            title="Posterior Marginal Std.-Dev.")
+    # # Plot posterior
+    # vis.plot_graph(graph_post_mean, name="post_mean", title="Posterior Mean")
+    # vis.plot_graph(graph_post_std, name="post_std",
+    #         title="Posterior Marginal Std.-Dev.")
 
     # Compute Metrics
     inverse_mask = torch.logical_not(graph_y.mask)
