@@ -275,7 +275,7 @@ def main():
         total_loss += loss.detach()
 
         # Print progress
-        if 0 == 0: #((iteration_i+1) % config["val_interval"]) == 0:
+        if True: #((iteration_i+1) % config["val_interval"]) == 0:
             # Initialize validation error accumulator
             val_error_accum = 0.0
             # Loop over time steps for validation
@@ -367,10 +367,10 @@ def main():
     #     vis.plot_graph(graph_vi_mean, name="vi_mean", title="VI Mean")
     #     vis.plot_graph(graph_vi_std, name="vi_std_dev", title="VI Std-dev.")
 
-    # Posterior inference
-    if hasattr(graph_y, "adj_matrix"):
-        # Make sure to delete stored adjacency matrix before inference to save memory
-        del graph_y.adj_matrix
+    # # Posterior inference
+    # if hasattr(graph_y, "adj_matrix"):
+    #     # Make sure to delete stored adjacency matrix before inference to save memory
+    #     del graph_y.adj_matrix
 
     # These posteriors are over y
     if vi_evaluation:

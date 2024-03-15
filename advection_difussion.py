@@ -6,13 +6,23 @@ import igraph as ig
 import torch
 from torch_geometric.data import Data
 from torch_geometric.utils import to_undirected
+from scipy.sparse import csr_matrix, lil_matrix
+from scipy.sparse.linalg import spsolve
 
-# Initialize parameters
+
+## Initalize parameters
+
+# Model parameters
 D = 0.01  # Diffusion coefficient
 v = np.array([-0.3, 0.3])  # Velocity vector
-n_lattice = 30 # Number of lattice points
-n_time = 20  # Number of timesteps
 sigma_obs = 0.01
+
+# Spatial
+n_lattice = 30 
+
+# Time
+n_time = 20  # Number of timesteps
+
 
 
 ## Create function for M matrix based on advection-diffusion equation
@@ -135,7 +145,7 @@ rho_matrix[:, 0] = rho_0
 
 
 # For the noise terms noise_rho, we use a time-invariantprecision matrix Q_k = S_k^T S_k where S_k = (10 * I - A)
-S_k = 4 * identity_matrix - A
+S_k = 10 * identity_matrix - A
 Q_k = S_k.transpose().dot(S_k)
 
 # Sst time-invariant transition matrix F_k = F ^ 4 in order to perform four time steps at each iteration
@@ -244,7 +254,6 @@ x_coord, y_coord = np.meshgrid(range(n_lattice), range(n_lattice)) # Create a me
 pos = np.stack((x_coord.flatten(), y_coord.flatten()), axis=1) # Stack the coordinates in the correct shape (n_lattice*n_lattice, 2)
 
 
-
 # Create graph Data objects for each time step and save
 for t in range(n_time):
 
@@ -262,6 +271,139 @@ for t in range(n_time):
     
     # Save graph data object as pickle file
     torch.save(graph_data, f'dataset/advection_diffusion/graph_y_{t}.pt')
+
+
+## Save degree matrix and adjacency matrix at pytorch tensors
+
+torch.save(torch.tensor(degree_matrix, dtype=torch.float), 'dataset/advection_diffusion/degree_matrix.pt')
+torch.save(torch.tensor(A, dtype=torch.float), 'dataset/advection_diffusion/adjacency_matrix.pt')
+
+
+#### True posterior mean
+
+## Create Q as sparse matrix - diagonal block matrix with Q_k in every block
+
+# Number of nodes
+n_nodes_spatial = n_lattice**2
+n_total = n_time * n_nodes_spatial
+
+# Initialize lists for row indices, column indices, and values
+row_indices = []
+col_indices = []
+values = []
+
+for k in tqdm(range(n_time)):
+    # Calculate the starting index for this block
+    start_index = k * n_nodes_spatial
+    
+    for i in range(n_nodes_spatial):
+        for j in range(n_nodes_spatial):
+            # Calculate the global row and column indices
+            row_idx = start_index + i
+            col_idx = start_index + j
+            
+            # Append the indices and value
+            row_indices.append(row_idx)
+            col_indices.append(col_idx)
+            if (k == 0):
+                values.append(Q_0[i, j])
+            else:
+                values.append(Q_k[i, j])  # Assuming Q_k is 2D
+
+# Convert lists to numpy arrays
+row_indices = np.array(row_indices)
+col_indices = np.array(col_indices)
+values = np.array(values)
+
+# Create the CSR matrix
+size = (n_time * n_nodes_spatial, n_time * n_nodes_spatial)
+Q = csr_matrix((values, (row_indices, col_indices)), shape=size)
+
+
+
+## Create F and F^T as sparse matrices
+## F is a block lower bi-diagonal matrix with I in the diagonal and -F_k in the subdiagonal
+## F^T is a block upper bi-diagonal matrix with I in the diagonal and -F_k^T in the superdiagonal
+
+# Convert F_k and its transpose to LIL format for easier construction
+F_k_lil = lil_matrix(F_k)
+F_k_T_lil = lil_matrix(F_k.T)  # Ensure F_k_T uses corrected transpose data
+
+# Initialize LIL matrices for F and F_T for easier construction
+F_lil = lil_matrix((n_total, n_total))
+F_T_lil = lil_matrix((n_total, n_total))
+
+for k in tqdm(range(n_time)):
+    row_start = k * n_nodes_spatial
+    row_end = (k + 1) * n_nodes_spatial
+    
+    # Identity blocks for F and F^T
+    F_lil[row_start:row_end, row_start:row_end] = np.eye(n_nodes_spatial)
+    F_T_lil[row_start:row_end, row_start:row_end] = np.eye(n_nodes_spatial)
+    
+    # -F_k blocks for F and -F_k^T blocks for F^T
+    if k < n_time - 1:
+        F_lil[row_end:row_end + n_nodes_spatial, row_start:row_end] = -F_k_lil
+        F_T_lil[row_start:row_end, row_end:row_end + n_nodes_spatial] = -F_k_T_lil
+
+# Convert LIL matrices to CSR for efficient storage and operations
+F = F_lil.tocsr()
+F_T = F_T_lil.tocsr()
+
+
+
+## Create mask - a vector with True for observed values and False for missing values
+
+for t in range(n_time):
+    mask_t = ~np.isnan(rho_matrix_mask[:, t]).flatten()
+    if t == 0:
+        mask = mask_t
+    else:# stack in columns
+        mask = np.vstack((mask, mask_t))
+
+# Convert mask to tensor
+mask = torch.tensor(mask.flatten(), dtype=torch.bool)
+
+# Create noise term
+mask_noise_term = (1./sigma_obs**2) * mask
+
+# Create noise_term_matrix as a sparse diag matrix with noise_term as the diagonal
+mask_noise_term_matrix = csr_matrix((mask_noise_term.flatten(), (np.arange(n_total), np.arange(n_total))), shape=(n_total, n_total))
+
+
+## Create Omega = F^T @ Q @ F as a sparse matrix
+
+Omega = F_T @ Q @ F 
+
+## Omega plus - lhs side of the equation for posterior mean  
+
+Omega_plus = Omega + mask_noise_term_matrix
+
+## Compute rhs of equation for posterior mean = Omega * mu + mask_noise_term * y
+## mu is zero in the example, hence rhs consists of only mask_noise_term * y
+
+# Compute rhs second term mask_noise_term * y
+for t in range(n_time):
+    y_t = obs_matrix[:, t].flatten()
+    mask_t = ~np.isnan(rho_matrix_mask[:, t]).flatten()
+    mask_y_t = mask_t * y_t
+    if t == 0:
+        mask_y = mask_y_t
+    else: # append
+        mask_y = np.append(mask_y, mask_y_t)
+
+## Solve the linear system Omega_plus * x = b for x, which represents the posterior mean in this context
+
+true_posterior_mean = spsolve(Omega_plus, mask_y)
+
+# Convert x_posterior_mean to tensor matrix with n_time columns
+true_posterior_mean_matrix = true_posterior_mean.reshape(n_nodes_spatial, n_time, order='F')
+
+# Save the posterior mean as a tensor
+true_posterior_mean_tensor = torch.tensor(true_posterior_mean_matrix, dtype=torch.float)
+torch.save(true_posterior_mean_tensor, 'dataset/advection_diffusion/true_posterior_mean.pt')
+
+
     
 
     

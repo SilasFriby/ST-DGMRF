@@ -102,4 +102,25 @@ class FlexLayer(LinearLayer):
         weighted_messages = x_j.view(-1, edge_weights.shape[0]) * edge_weights
 
         return weighted_messages.view(-1,1)
+    
+    def create_S_matrix(self, degree_matrix, adjacency_matrix):
+        # Create S matrix for the layer
+        alpha1 = self.self_weight
+        alpha2 = self.neighbor_weight
+        gamma = self.degree_power
+        
+        # Compute degree matrix to the power of gamma and gamma - 1 using the diagonal to avoid inf entries due to zeros in off-diagonal
+        powered_diagonal_gamma = torch.pow(degree_matrix.diagonal(), gamma)
+        degree_matrix_pow_gamma = torch.diag(powered_diagonal_gamma)
+        powered_diagonal_gamma_minus_1 = torch.pow(degree_matrix.diagonal(), gamma - 1)
+        degree_matrix_pow_gamma_minus_1 = torch.diag(powered_diagonal_gamma_minus_1)    
+
+        S = alpha1 * degree_matrix_pow_gamma + alpha2 \
+            * torch.matmul(degree_matrix_pow_gamma_minus_1, adjacency_matrix)
+
+        return S
+
+
+
+        
 
