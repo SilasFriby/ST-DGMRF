@@ -33,8 +33,8 @@ def get_config():
     parser.add_argument("--n_layers_temporal", type=float, default=4,
         help="Number of layers in temporal model")
     parser.add_argument("--n_iterations", type=int,
-        help="How many iterations to train for", default=1) #1000
-    parser.add_argument("--n_training_samples", type=int, default=1, #10
+        help="How many iterations to train for", default=1000) #1000
+    parser.add_argument("--n_training_samples", type=int, default=10, #10
         help="Number of samples to use for each iteration in training")
     parser.add_argument("--sample_times_start", type=float, default=3,
         help="Start sample time")
@@ -42,9 +42,9 @@ def get_config():
         help="End sample time")
 
     # General
-    parser.add_argument("--dataset", type=str, default="advection_diffusion", #"toy_gmrf42_random", #
+    parser.add_argument("--dataset", type=str, default="advection_diffusion", 
             help="Which dataset to use")
-    parser.add_argument("--seed", type=int, default=123,
+    parser.add_argument("--seed", type=int, default=1234,
             help="Seed for random number generator")
     parser.add_argument("--noise_std", type=int, default=1e-2,
             help="Value to use for noise std.-dev. (if not learned, otherwise initial)")
@@ -99,9 +99,11 @@ def get_config():
     parser.add_argument("--dump_prediction", type=int, default=0,
         help="If produced graphs should be saved to files")
     
-    # Temporal
+    # N args
     parser.add_argument("--n_lattice", type=int, default=30,
-        help="Number of lattice points in each dimension")
+        help="Number of lattice points in each dimension in the spatial graph")
+    parser.add_argument("--n_space", type=int, default=30**2,
+        help="Number of spatial points at each time step")
     parser.add_argument("--n_time", type=float, default=20,
         help="Number of time steps")
     
@@ -155,20 +157,42 @@ def main():
     dataset_dict = utils.load_dataset(config["dataset"])
     
     # Initialize spatial graph using the first time step - all time steps have the same spatial graph 
-    graph_y = dataset_dict["graph_y_0"]
+    # graph_y = dataset_dict["graph_y_0"]
 
-    # Instantiate models and variational distribution
-    temporal_model = TemporalModel(config)
-    dgmrf = DGMRF(graph_y, config)
-    vi_dist = vi.VariationalDist(config, graph_y)
+    # Time points
+    if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
+        config["n_time"] = config["sample_times_end"] - config["sample_times_start"] + 1
 
     # Initialize optimal parameters
     opt_params = ()
 
-    # Add temporal, spatial and variational parameters to opt_params
+    # Instatiate temporal model 
+    temporal_model = TemporalModel(config)
     opt_params += tuple(temporal_model.parameters())
-    opt_params += tuple(dgmrf.parameters())
-    opt_params += tuple(vi_dist.parameters())
+    
+    # Instatiate spatial model and variational distribution 
+    # Spatial model: an independent DGMRF for each time step, cf. section 3.2.1
+    # Variational distribution: an independent variational distribution for each time step, cf. section 3.3.1
+    dgmrf_list = []
+    vi_dist_list = []
+    for k in range(config["n_time"]):
+        # Graph data
+        if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
+            graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
+        else:
+            graph_k = dataset_dict["graph_y_" + str(k)]
+        
+        # Instantiate spatial model 
+        dgmrf_k = DGMRF(graph_k, config)
+        opt_params += tuple(dgmrf_k.parameters())
+
+        # Instantiate vi_dist for each time step
+        vi_dist_k = vi.VariationalDist(config, graph_k)
+        opt_params += tuple(vi_dist_k.parameters())
+
+        # Append to list
+        dgmrf_list.append(dgmrf_k)
+        vi_dist_list.append(vi_dist_k)
 
     # Add noise std to opt_param if learn_noise_std == 1
     config["log_noise_std"] = torch.log(torch.tensor(config["noise_std"]))
@@ -190,12 +214,6 @@ def main():
     best_temporal_params = None
     best_spatial_params = None
 
-    # Time points
-    if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
-        n_time = config["sample_times_end"] - config["sample_times_start"] + 1
-    else:
-        n_time = config["n_time"]
-
     # Start timing
     start_time = time.time()  
 
@@ -204,22 +222,23 @@ def main():
         optimizer.zero_grad()
         elbo = torch.zeros(1)
 
-        for k in range(n_time):
+        for k in range(config["n_time"]):
 
             ## Data
 
             # Graph data
             if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
-                graph_y = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
+                graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
             else:
-                graph_y = dataset_dict["graph_y_" + str(k)]
-            graph_y.n_observed = torch.sum(graph_y.mask).to(torch.float32)
+                graph_k = dataset_dict["graph_y_" + str(k)]
 
+            graph_k.n_observed = torch.sum(graph_k.mask).to(torch.float32)
 
             ## Train using variational distribution - i.e compute ELBO and use as loss function
 
             # Sample from variational distribution
-            vi_samples = vi_dist.sample()
+            vi_dist_k = vi_dist_list[k]
+            vi_samples = vi_dist_k.sample()
 
             # Prepare vi samples for batched temporal model
             # Hence, reshape to (n_samples, n_nodes, 1) for torch.bmm in temporal.py to work correctly
@@ -229,42 +248,29 @@ def main():
             h_k = temporal_model(vi_samples_temporal_batch_format)
 
             # Prepare vi samples after temporal transform for batched spatial model
-            vi_dist.sample_batch.x = h_k.reshape(-1,1)
+            vi_dist_k.sample_batch.x = h_k.reshape(-1,1)
 
-            # Feed samples through spatial model
-            g_k = dgmrf(vi_dist.sample_batch)
+            # Feed samples through spatial model - SHOULD WE HAVE A DGMRF FOR EACH TIME STEP - dgmrf_k, see section 3.2.1??
+            dgmrf_k = dgmrf_list[k]
+            g_k = dgmrf_k(vi_dist_k.sample_batch)
 
             # Compute log determinant of variational distribution
-            vi_log_det = vi_dist.log_det()
+            vi_log_det = vi_dist_k.log_det()
 
             # Compute ELBO components for time step k
             l1 = 0.5 * vi_log_det
-            l2 = -graph_y.n_observed * config["log_noise_std"]
-            l3 = dgmrf.log_det()
+            l2 = -graph_k.n_observed * config["log_noise_std"]
+            l3 = dgmrf_k.log_det()
             l4 = -(1./(2. * config["n_training_samples"])) * torch.sum(torch.pow(g_k,2))
             l5 = -(1./(2. * utils.noise_var(config)*\
                 config["n_training_samples"])) * torch.sum(torch.pow(
-                    (vi_samples - graph_y.x.flatten()), 2)[:, graph_y.mask])
-            
-            # If additional features are being used - I HAVE NOT CHECKED IF THIS WORKS CORRECTLY FOR SPATIAL-TEMPORAL MODEL!!
-            if config["features"]:
-                vi_coeff_samples = vi_dist.sample_coeff(config["n_training_samples"])
-                # Mean from a VI sample (x + linear feature model)
-                vi_samples += vi_coeff_samples @ graph_y.features.transpose(0,1)
-
-                # Added term when using additional features
-                vi_coeff_log_det = vi_dist.log_det_coeff()
-                entropy_term = 0.5*vi_coeff_log_det
-                ce_term = vi_dist.ce_coeff()
-
-                l1 = l1 + entropy_term
-                l4 = l4 + ce_term
+                    (vi_samples - graph_k.x.flatten()), 2)[:, graph_k.mask])
             
             # Update ELBO
             elbo += l1 + l2 + l3 + l4 + l5
 
         # Compute normalized loss for this iteration
-        n_nodes = graph_y.num_nodes * config["n_time"]
+        n_nodes = config["n_space"] * config["n_time"]
         loss = (-1. / n_nodes) * elbo
         
         # Backpropagation
@@ -275,31 +281,29 @@ def main():
         total_loss += loss.detach()
 
         # Print progress
-        if True: #((iteration_i+1) % config["val_interval"]) == 0:
+        if ((iteration_i+1) % config["val_interval"]) == 0:
             # Initialize validation error accumulator
             val_error_accum = 0.0
             # Loop over time steps for validation
             for k in range(config["n_time"]):
                 # Fetch the graph data for time step k
-                graph_y = dataset_dict["graph_y_" + str(k)]
+                if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
+                    graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
+                else:
+                    graph_k = dataset_dict["graph_y_" + str(k)]
 
                 # Masked data for validation
-                val_mask = torch.logical_not(graph_y.mask)
-                graph_y.n_unobserved = torch.sum(val_mask).to(torch.float32)
+                val_mask = torch.logical_not(graph_k.mask)
+                graph_k.n_unobserved = torch.sum(val_mask).to(torch.float32)
 
                 # Sample from the variational distribution
-                val_samples = vi_dist.sample()
-
-                # If additional features are being used - I HAVE NOT CHECKED IF THIS WORKS CORRECTLY FOR SPATIAL-TEMPORAL MODEL!!
-                if config["features"]:
-                    # Sample coefficients and adjust validation samples
-                    vi_coeff_samples = vi_dist.sample_coeff(config["n_training_samples"])
-                    val_samples += vi_coeff_samples @ graph_y.features.transpose(0,1)
+                vi_dist_k = vi_dist_list[k]
+                val_samples = vi_dist_k.sample()
 
                 # Calculate validation error for current time step
-                if not graph_y.n_unobserved == 0:
-                    val_error = (1./(config["n_training_samples"]*graph_y.n_unobserved)) *\
-                                torch.sum(torch.pow((val_samples - graph_y.x.flatten()), 2)[:, val_mask])
+                if not graph_k.n_unobserved == 0:
+                    val_error = (1./(config["n_training_samples"]*graph_k.n_unobserved)) *\
+                                torch.sum(torch.pow((val_samples - graph_k.x.flatten()), 2)[:, val_mask])
                     val_error_accum += val_error.item()
 
             # Average validation error over time steps
@@ -314,15 +318,19 @@ def main():
 
             # Save best parameters based on validation error
             if (best_loss is None) or (mean_loss < best_loss):
-                best_temporal_params = copy.deepcopy(temporal_model.state_dict())  
-                best_spatial_params = copy.deepcopy(dgmrf.state_dict())
-                best_vi_params = copy.deepcopy(vi_dist.state_dict())
+                best_temporal_params = copy.deepcopy(temporal_model.state_dict())   
+                best_spatial_params = []
+                best_vi_params = []
+                for k in range(config["n_time"]):
+                    best_spatial_params.append(copy.deepcopy(dgmrf_list[k].state_dict()))
+                    best_vi_params.append(copy.deepcopy(vi_dist_list[k].state_dict()))
                 best_loss = mean_loss
 
             if config["print_params"]:
                 # Print parameters of both temporal and spatial models
-                utils.print_params(temporal_model, config, "--- Temporal Model parameters ---")
-                utils.print_params(dgmrf, config, "--- Spatial Model parameters ---")
+                utils.print_params(temporal_model, config, model_type="temporal", header="--- Temporal Model parameters ---")
+                for k in range(config["n_time"]):
+                    utils.print_params(dgmrf_list[k], config, model_type="spatial", header="--- Spatial Model parameters (time step {}) ---".format(k))
 
 
     # # Summary
@@ -340,8 +348,9 @@ def main():
 
     # Reload best parameters
     temporal_model.load_state_dict(best_temporal_params)
-    dgmrf.load_state_dict(best_spatial_params)
-    vi_dist.load_state_dict(best_vi_params)
+    for k in range(config["n_time"]):
+        dgmrf_list[k].load_state_dict(best_spatial_params[k])
+        vi_dist_list[k].load_state_dict(best_vi_params[k])
     
     # # Print final parameters 
     # utils.print_params(dgmrf, config, model_type="spatial", header="Final Spatial Model Parameters:")
@@ -352,31 +361,12 @@ def main():
     # # Plot y
     # vis.plot_graph(graph_y, name="y", title="y")
 
-    # Plot VI
-    vi_evaluation = config["vi_eval"] or config["non_linear"]
-    # if config["plot_vi_samples"]:
-    #     graph_vi_sample = utils.new_graph(graph_y)
-    #     vi_samples = vi_dist.sample()[:config["plot_vi_samples"]]
-    #     # VI samples plotted when using features are only x (without linear model)
-    #     for sample_i, vi_sample in enumerate(vi_samples.detach()):
-    #         graph_vi_sample.x = vi_sample.unsqueeze(1)
-    #         vis.plot_graph(graph_vi_sample, show=True, name="vi_sample",
-    #                 title="VI Sample {}".format(sample_i))
-    # if not vi_evaluation:
-    #     graph_vi_mean, graph_vi_std = vi_dist.posterior_estimate(graph_y, config)
-    #     vis.plot_graph(graph_vi_mean, name="vi_mean", title="VI Mean")
-    #     vis.plot_graph(graph_vi_std, name="vi_std_dev", title="VI Std-dev.")
-
-    # # Posterior inference
-    # if hasattr(graph_y, "adj_matrix"):
-    #     # Make sure to delete stored adjacency matrix before inference to save memory
-    #     del graph_y.adj_matrix
-
     # These posteriors are over y
+    vi_evaluation = config["vi_eval"] or config["non_linear"]
     if vi_evaluation:
         # Use variational distribution in place of true posterior
         print("Using variational distribution as posterior estimate ...")
-        graph_post_mean, graph_post_std = vi_dist.posterior_estimate(graph_y, config)
+        # graph_post_mean, graph_post_std = vi_dist.posterior_estimate(graph_y, config)
     else:
         # Exact posterior inference
         print("Running posterior inference ...")
@@ -386,96 +376,102 @@ def main():
         # Start timing
         start_time = time.time() 
 
-        post_mean = inference.posterior_inference(temporal_model=temporal_model, 
-                                                  dgmrf=dgmrf, 
-                                                  vi_dist=vi_dist,
-                                                  config=config, 
-                                                  graph_y=graph_y, 
-                                                  n_time=n_time, 
-                                                  dataset_dict=dataset_dict)
+        post_mean_model = inference.posterior_inference(
+            temporal_model=temporal_model, 
+            dgmrf_list=dgmrf_list, 
+            vi_dist_list=vi_dist_list,
+            config=config,  
+            dataset_dict=dataset_dict
+        )
         
         # End timing
         current_time = time.time()
         elapsed_time = (current_time - start_time) / 60
-        print(f"Computation time for CG method: {elapsed_time:.2f} minutes")
+        print(f"Computation time for posterior inference CG method: {elapsed_time:.2f} minutes")
 
     # NEXT UP: 
     # (1) Compute true posterior mean and std.-dev. for comparison - perhaps best to do so in advection_diffusion.py to include it in the dataset_dict
     # (2) Compute metrics for evaluation - RMSE, CRPS, INT
-        
-
-
-    # # Plot posterior
-    # vis.plot_graph(graph_post_mean, name="post_mean", title="Posterior Mean")
-    # vis.plot_graph(graph_post_std, name="post_std",
-    #         title="Posterior Marginal Std.-Dev.")
+    
 
     # Compute Metrics
-    inverse_mask = torch.logical_not(graph_y.mask)
-    if ("graph_post_true_mean" in dataset_dict) and (
-            "graph_post_true_std" in dataset_dict):
-        graph_post_true_mean = dataset_dict["graph_post_true_mean"]
-        graph_post_true_std = dataset_dict["graph_post_true_std"]
+    if ("post_mean_true" in dataset_dict): #and ("graph_post_true_std" in dataset_dict):
+        
+        # Get true posterior mean from dataset_dict
+        post_mean_true = dataset_dict["post_mean_true"]
 
-        # Plot true posterior
-        vis.plot_graph(graph_post_true_mean, name="post_true_mean",
-                title="True Posterior Mean")
-        vis.plot_graph(graph_post_true_std, name="post_true_std",
-                title="True Posterior Std.-dev.")
+        # Reshape post_mean_model to match shape of post_mean_true. Hence, from (n_time x n_nodes, 1) to (n_nodes, n_time) 
+        post_mean_model = post_mean_model.reshape(config["n_time"], config["n_space"]).transpose(0,1)
 
-        mean_diff = (graph_post_mean.x - graph_post_true_mean.x)[inverse_mask, :]
-        std_diff = (graph_post_std.x - graph_post_true_std.x)[inverse_mask, :]
+        # Loop over time and compute metrics
+        mae_total = 0.0
+        rmse_total = 0.0
+        for k in range(config["n_time"]):
+            # Load graph
+            if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
+                graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
+            else:
+                graph_k = dataset_dict["graph_y_" + str(k)]
 
-        mean_mae = torch.mean(torch.abs(mean_diff))
-        std_mae = torch.mean(torch.abs(std_diff))
+            # Compute metrics for unobserved nodes
+            inverse_mask = torch.logical_not(graph_k.mask)
+            diff = (post_mean_model[:,k] - post_mean_true[:,k])[inverse_mask]
+            mae = torch.mean(torch.abs(diff))
+            rmse = torch.sqrt(torch.mean(torch.pow(diff, 2)))
+            mae_total += mae
+            rmse_total += rmse
 
-        print("MAE of posterior mean: {:.7}".format(mean_mae))
-        print("MAE of posterior std.-dev.: {:.7}".format(std_mae))
+            # Print metrics
+            print("Time step: {}, MAE: {:.7}, RMSE: {:.7}".format(k, mae, rmse))
 
-    # Compare posterior mean with y
-    diff = (graph_post_mean.x - graph_y.x)[inverse_mask, :]
-    mae = torch.mean(torch.abs(diff))
-    rmse = torch.sqrt(torch.mean(torch.pow(diff, 2)))
+        print("Total MAE of posterior mean: {:.7}".format(mae_total))
+        print("Total RMSE of posterior meam: {:.7}".format(rmse_total))
 
-    pred_mean_np = graph_post_mean.x[inverse_mask, :].cpu().numpy()
-    pred_std_np = graph_post_std.x[inverse_mask, :].cpu().numpy()
-    target_np = graph_y.x[inverse_mask, :].cpu().numpy()
+    
+    # # Compare posterior mean with y
+    # diff = (graph_post_mean.x - graph_y.x)[inverse_mask, :]
+    # mae = torch.mean(torch.abs(diff))
+    # rmse = torch.sqrt(torch.mean(torch.pow(diff, 2)))
 
-    crps =  utils.crps_score(pred_mean_np, pred_std_np, target_np)
-    int_score = utils.int_score(pred_mean_np, pred_std_np, target_np)
+    # pred_mean_np = graph_post_mean.x[inverse_mask, :].cpu().numpy()
+    # pred_std_np = graph_post_std.x[inverse_mask, :].cpu().numpy()
+    # target_np = graph_y.x[inverse_mask, :].cpu().numpy()
 
-    print("MAE:  \t{:.7}".format(mae))
-    print("RMSE: \t{:.7}".format(rmse))
-    print("CRPS: \t{:.7}".format(crps))
-    print("INT:  \t{:.7}".format(int_score))
-    wandb.run.summary["mae"] = mae
-    wandb.run.summary["rmse"] = rmse
-    wandb.run.summary["crps"] = crps
-    wandb.run.summary["int_score"] = int_score
+    # crps =  utils.crps_score(pred_mean_np, pred_std_np, target_np)
+    # int_score = utils.int_score(pred_mean_np, pred_std_np, target_np)
 
-    if "graph_x" in dataset_dict:
-        # Plot x, if known
-        graph_x = dataset_dict["graph_x"]
-        vis.plot_graph(graph_x, name="x", title="x")
+    # print("MAE:  \t{:.7}".format(mae))
+    # print("RMSE: \t{:.7}".format(rmse))
+    # print("CRPS: \t{:.7}".format(crps))
+    # print("INT:  \t{:.7}".format(int_score))
+    # wandb.run.summary["mae"] = mae
+    # wandb.run.summary["rmse"] = rmse
+    # wandb.run.summary["crps"] = crps
+    # wandb.run.summary["int_score"] = int_score
 
-    # Plot additional zooms for dataset
-    zoom_list = utils.get_dataset_zooms(config["dataset"])
-    for zoom_i, zoom in enumerate(zoom_list):
-        # Plot y, posterior mean and posterior std for zooms
-        vis.plot_graph(graph_y, name="y", title="y (zoom {})".format(zoom_i), zoom=zoom)
-        vis.plot_graph(graph_post_mean, name="post_mean",
-                title="Posterior Mean (zoom {})".format(zoom_i), zoom=zoom)
-        vis.plot_graph(graph_post_std, name="post_std",
-            title="Posterior Marginal Std.-Dev. (zoom {})".format(zoom_i), zoom=zoom)
+    # if "graph_x" in dataset_dict:
+    #     # Plot x, if known
+    #     graph_x = dataset_dict["graph_x"]
+    #     vis.plot_graph(graph_x, name="x", title="x")
 
-    # Optionally save prediction graphs
-    if config["dump_prediction"]:
-        save_graphs = {"post_mean": graph_post_mean, "post_std": graph_post_std}
-        if not vi_evaluation:
-            save_graphs.update({"vi_mean": graph_vi_mean, "vi_std": graph_vi_std})
+    # # Plot additional zooms for dataset
+    # zoom_list = utils.get_dataset_zooms(config["dataset"])
+    # for zoom_i, zoom in enumerate(zoom_list):
+    #     # Plot y, posterior mean and posterior std for zooms
+    #     vis.plot_graph(graph_y, name="y", title="y (zoom {})".format(zoom_i), zoom=zoom)
+    #     vis.plot_graph(graph_post_mean, name="post_mean",
+    #             title="Posterior Mean (zoom {})".format(zoom_i), zoom=zoom)
+    #     vis.plot_graph(graph_post_std, name="post_std",
+    #         title="Posterior Marginal Std.-Dev. (zoom {})".format(zoom_i), zoom=zoom)
 
-        for name, graph in save_graphs.items():
-            utils.save_graph(graph, "{}_graph".format(name), wandb.run.dir)
+    # # Optionally save prediction graphs
+    # if config["dump_prediction"]:
+    #     save_graphs = {"post_mean": graph_post_mean, "post_std": graph_post_std}
+    #     if not vi_evaluation:
+    #         save_graphs.update({"vi_mean": graph_vi_mean, "vi_std": graph_vi_std})
+
+    #     for name, graph in save_graphs.items():
+    #         utils.save_graph(graph, "{}_graph".format(name), wandb.run.dir)
 
 if __name__ == "__main__":
     main()

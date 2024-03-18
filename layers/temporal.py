@@ -3,6 +3,7 @@ import torch
 class TemporalLayer(torch.nn.Module):
     def __init__(self, config):
         super(TemporalLayer, self).__init__()
+        self.n_space = config['n_space']
         self.n_lattice = config['n_lattice']
         self.n_samples = config['n_training_samples']
         
@@ -21,7 +22,7 @@ class TemporalLayer(torch.nn.Module):
             
 
         # Create identity matrix with batch dimension
-        identity_matrix = torch.eye(self.n_lattice**2, dtype=x.dtype).unsqueeze(0).repeat(n_samples, 1, 1)
+        identity_matrix = torch.eye(self.n_space, dtype=x.dtype).unsqueeze(0).repeat(n_samples, 1, 1)
 
         # Create the matrix M with learnable parameters d, v1, v2
         M = self.create_matrix_M()
@@ -47,7 +48,7 @@ class TemporalLayer(torch.nn.Module):
         n_lattice = self.n_lattice
 
         # Safety check - node should be within the lattice
-        if node < 0 or node >= n_lattice**2:
+        if node < 0 or node >= self.n_space:
             raise ValueError("Node index out of bounds")
         
         # Right neighbor
@@ -69,7 +70,7 @@ class TemporalLayer(torch.nn.Module):
             neighbor_up = node + n_lattice * (n_lattice - 1) 
 
         # Down neighbor
-        if node + n_lattice < n_lattice**2:
+        if node + n_lattice < self.n_space:
             neighbor_down = node + n_lattice
         else:
             neighbor_down = node - n_lattice * (n_lattice - 1)
@@ -86,19 +87,19 @@ class TemporalLayer(torch.nn.Module):
         return neighbor_dict
 
     def create_matrix_M(self):
-        n_lattice = self.n_lattice
+        n_space = self.n_space
         D = self.d**2
         v = torch.stack([self.v1, self.v2])
         
         # Initialize the matrix M with zeros
-        M = torch.zeros((n_lattice**2, n_lattice**2), dtype=self.d.dtype)
+        M = torch.zeros((n_space, n_space), dtype=self.d.dtype)
 
         # Diagonal elements
         # Set diagonal entries equal to -4D. D.item is used to convert the tensor to a scalar
-        M = M + torch.diag(torch.full((n_lattice**2,), -4 * D.item()))
+        M = M + torch.diag(torch.full((n_space,), -4 * D.item()))
 
         # Off-diagonal elements
-        for node in range(n_lattice**2):
+        for node in range(n_space):
             neighbor_dict = self.get_neighbor_nodes(node)
             
             for neighbor_name, neighbor_node in neighbor_dict.items():

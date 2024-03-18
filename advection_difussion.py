@@ -401,7 +401,7 @@ true_posterior_mean_matrix = true_posterior_mean.reshape(n_nodes_spatial, n_time
 
 # Save the posterior mean as a tensor
 true_posterior_mean_tensor = torch.tensor(true_posterior_mean_matrix, dtype=torch.float)
-torch.save(true_posterior_mean_tensor, 'dataset/advection_diffusion/true_posterior_mean.pt')
+torch.save(true_posterior_mean_tensor, 'dataset/advection_diffusion/post_mean_true.pt')
 
 
     
