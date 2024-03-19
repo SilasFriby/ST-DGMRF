@@ -3,7 +3,6 @@ import torch_geometric as ptg
 
 from lib.cg_batch import cg_batch
 import utils
-import visualization as vis
 
 def get_bias(dgmrf, graph_y):
     zero_graph = utils.new_graph(graph_y, new_x=torch.zeros(graph_y.num_nodes, 1))
@@ -39,7 +38,10 @@ def regularized_cg(
 
     # Right-hand side        
     def rhs(x, nu): 
-        return nu * x + B    
+        return nu * x + B  
+
+    # # Divergence counter
+    # count_divergence = 0
     
     # Run the regularized CG iterations
     for outer_iter in range(max_outer_iter):
@@ -66,11 +68,38 @@ def regularized_cg(
         if verbose:
             print("Outer iteration {}: Outer residual norm {}: Inner CG finished in {} iterations, Inner CG solution optimal: {}".format(
                 outer_iter, norm_residuals, cg_info["niter"], cg_info["optimal"]))
+            
+    #     # Update best solution
+    #     if outer_iter == 0:
+    #         best_norm_residuals = norm_residuals
+    #         best_solution = x_i
+    #         best_outer_iter = outer_iter
+    #         best_cg_info = cg_info
+    #     elif norm_residuals < best_norm_residuals and cg_info["optimal"] is True:
+    #         best_norm_residuals = norm_residuals
+    #         best_solution = x_i
+    #         best_outer_iter = outer_iter
+    #         best_cg_info = cg_info
         
 
-        # Check for convergence
-        if norm_residuals < rtol: # or cg_info["optimal"] is True:
-            break   
+    #     # Check for convergence
+    #     if norm_residuals < rtol: # or cg_info["optimal"] is True:
+    #         break 
+
+    #     # Check for divergence
+    #     if norm_residuals > best_norm_residuals and cg_info["optimal"] is False:
+    #         count_divergence += 1
+    #     else: # Reset to zero
+    #         count_divergence = 0
+
+    #     if count_divergence > 10:
+    #         print("Divergence detected. Exiting before reaching the maximum number of outer iterations.")
+    #         break
+
+    # # Optionally print final CG information
+    # if verbose:
+    #     print("Solution with lowest residual norm was found in Outer iteration {} with residual norm {}. The inner CG had solution optimal: {}".format(
+    #         best_outer_iter, best_norm_residuals, best_cg_info["optimal"]))
 
     return x_i
 
@@ -322,6 +351,9 @@ def posterior_inference(
 
     ## (1) S @ c 
 
+    # Initialize graph_dummy for spatial model
+    graph_dummy = utils.new_graph(dataset_dict["graph_y_0"], new_x=torch.zeros(n_space, 1))
+
     for k in range(n_time):
         # Load graph at time k
         if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
@@ -334,11 +366,11 @@ def posterior_inference(
         b_f_k = temporal_model(zeros_temporal_format, with_bias=True, overwrite_n_samples=1) #  SHOULD b_f_k BE DIFFERENT FOR EACH TIME POINT?? 
 
         # Prepare b_f_k for spatial model
-        graph_k.x = b_f_k.squeeze(0)
+        graph_dummy.x = b_f_k.squeeze(0)
 
         # Feed b_f_k through spatial model to obtain model bias at time k b_theta_k
         dgmrf_k = dgmrf_list[k]
-        b_theta_k = dgmrf_k(graph_k, with_bias=True) # b_theta_k = S_k @ b_f_k + b_s_k
+        b_theta_k = dgmrf_k(graph_dummy, with_bias=True) # b_theta_k = S_k @ b_f_k + b_s_k
         
         # S @ c = -b_theta, cf. equation (10)
         S_c_k = -b_theta_k
@@ -346,8 +378,8 @@ def posterior_inference(
         ## (2) Q @ c = S^T @ S @ c
 
         # At time k
-        graph_k.x = S_c_k
-        Q_c_k = dgmrf_k(graph_k, transpose=True, with_bias=False) # S^T @ S @ c
+        graph_dummy.x = S_c_k
+        Q_c_k = dgmrf_k(graph_dummy, transpose=True, with_bias=False) # S^T @ S @ c
 
         # Append Q_c_k
         if k == 0:

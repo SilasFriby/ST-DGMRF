@@ -1,51 +1,44 @@
 import torch
-import torch_geometric as ptg
 import numpy as np
-import networkx as nx
 import json
 import os
 import time
-import pickle
 import argparse
-import wandb
 import copy
-from tqdm import tqdm
-
-from lib.cg_batch import cg_batch
-import visualization as vis
-import vi
+from temporal_model import TemporalModel
 from dgmrf import DGMRF
-import constants
+import vi
 import utils
 import inference
 
-from temporal_model import TemporalModel
+
 
 def get_config():
     parser = argparse.ArgumentParser(description='Graph DGMRF')
     # If config file should be used
     parser.add_argument("--config", type=str, help="Config file to read run config from")
 
-
     # Arguments of importance
     parser.add_argument("--n_layers", type=int,
                     help="Number of message passing layers", default=2) 
-    parser.add_argument("--n_layers_temporal", type=float, default=4,
+    parser.add_argument("--n_layers_temporal", type=float, default=3,
         help="Number of layers in temporal model")
     parser.add_argument("--n_iterations", type=int,
         help="How many iterations to train for", default=1000) #1000
-    parser.add_argument("--n_training_samples", type=int, default=10, #10
+    parser.add_argument("--n_training_samples", type=int, default=100, #10
         help="Number of samples to use for each iteration in training")
-    parser.add_argument("--sample_times_start", type=float, default=3,
+    parser.add_argument("--val_interval", type=int, default=10, 
+        help="Evaluate model every val_interval:th iteration")
+    parser.add_argument("--sample_times_start", type=float, default=0,
         help="Start sample time")
-    parser.add_argument("--sample_times_end", type=float, default=4,
+    parser.add_argument("--sample_times_end", type=float, default=3,
         help="End sample time")
+    parser.add_argument("--seed", type=int, default=1,
+        help="Seed for random number generator")
 
     # General
     parser.add_argument("--dataset", type=str, default="advection_diffusion", 
             help="Which dataset to use")
-    parser.add_argument("--seed", type=int, default=1234,
-            help="Seed for random number generator")
     parser.add_argument("--noise_std", type=int, default=1e-2,
             help="Value to use for noise std.-dev. (if not learned, otherwise initial)")
     parser.add_argument("--learn_noise_std", type=int, default=1,
@@ -76,8 +69,6 @@ def get_config():
         help="Method for log-det. computations (eigvals/dad), dad is using power series")
     parser.add_argument("--lr", type=float,
             help="Learning rate", default=0.01)
-    parser.add_argument("--val_interval", type=int, default=10**2, #100
-            help="Evaluate model every val_interval:th iteration")
     parser.add_argument("--vi_layers", type=int, default=1,
         help="Flex-layers to apply to independent vi-samples to introduce correlation")
 
@@ -137,10 +128,6 @@ def main():
     # Get config parameters
     config = get_config()
 
-    # # (implementation details force this, but not a problem)
-    # assert config["plot_vi_samples"] <= config["n_training_samples"], (
-    #         "plot_vi_samples must be less or equal to than n_training_samples")
-
     # Set all random seeds
     seed_all(config["seed"])
 
@@ -153,8 +140,12 @@ def main():
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     # Load data
     dataset_dict = utils.load_dataset(config["dataset"])
+    for key in dataset_dict.keys():
+      dataset_dict[key] = dataset_dict[key].to(device)
     
     # Initialize spatial graph using the first time step - all time steps have the same spatial graph 
     # graph_y = dataset_dict["graph_y_0"]
@@ -169,6 +160,7 @@ def main():
     # Instatiate temporal model 
     temporal_model = TemporalModel(config)
     opt_params += tuple(temporal_model.parameters())
+    temporal_model.to(device)
     
     # Instatiate spatial model and variational distribution 
     # Spatial model: an independent DGMRF for each time step, cf. section 3.2.1
@@ -185,10 +177,12 @@ def main():
         # Instantiate spatial model 
         dgmrf_k = DGMRF(graph_k, config)
         opt_params += tuple(dgmrf_k.parameters())
+        dgmrf_k.to(device)
 
         # Instantiate vi_dist for each time step
         vi_dist_k = vi.VariationalDist(config, graph_k)
         opt_params += tuple(vi_dist_k.parameters())
+        vi_dist_k.to(device)
 
         # Append to list
         dgmrf_list.append(dgmrf_k)
@@ -281,7 +275,7 @@ def main():
         total_loss += loss.detach()
 
         # Print progress
-        if ((iteration_i+1) % config["val_interval"]) == 0:
+        if True:#((iteration_i+1) % config["val_interval"]) == 0:
             # Initialize validation error accumulator
             val_error_accum = 0.0
             # Loop over time steps for validation
@@ -402,6 +396,17 @@ def main():
 
         # Reshape post_mean_model to match shape of post_mean_true. Hence, from (n_time x n_nodes, 1) to (n_nodes, n_time) 
         post_mean_model = post_mean_model.reshape(config["n_time"], config["n_space"]).transpose(0,1)
+
+        # Save post_mean_model to .pt file
+        torch.save(post_mean_model, 
+                   "results/post_mean_model_" + 
+                   str(config['n_layers']) + "_" + 
+                   str(config['n_layers_temporal']) + "_" + 
+                   str(config['n_iterations']) + "_" + 
+                   str(config['n_training_samples']) + "_" + 
+                   str(config['sample_times_start']) + "_" + 
+                   str(config['sample_times_end']) + 
+                   ".pt")
 
         # Loop over time and compute metrics
         mae_total = 0.0

@@ -203,10 +203,10 @@ def apply_mask(rho_matrix, t_start, t_end, w, n_lattice):
 
 ## Mask the simulations
 
-w = 9  # Mask width
-n_time_mask = 10  # Number of timesteps to mask
-t_start = 3  # Example start time, you can choose any start time
-t_end = t_start + n_time_mask  # End time after 10 consecutive timesteps
+w = 9  # Width of the mask
+n_time_mask = 10  
+t_start = 3  
+t_end = t_start + n_time_mask 
 rho_matrix_mask = apply_mask(rho_matrix.copy(), t_start, t_end, w, n_lattice)
 
 
