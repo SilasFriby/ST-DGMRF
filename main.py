@@ -21,12 +21,12 @@ def get_config():
     # Arguments of importance
     parser.add_argument("--n_layers", type=int,
                     help="Number of message passing layers", default=2) 
-    parser.add_argument("--n_layers_temporal", type=float, default=2,
-        help="Number of layers in temporal model")
+    parser.add_argument("--n_layers_temporal", type=int,
+        help="Number of layers in temporal model", default=2)
     parser.add_argument("--n_iterations", type=int,
-        help="How many iterations to train for", default=1) #1000
-    parser.add_argument("--n_training_samples", type=int, default=2, #10
-        help="Number of samples to use for each iteration in training")
+        help="How many iterations to train for", default=100)
+    parser.add_argument("--n_training_samples", type=int,
+        help="Number of samples to use for each iteration in training", default=10)
     parser.add_argument("--val_interval", type=int, default=10, 
         help="Evaluate model every val_interval:th iteration")
     parser.add_argument("--sample_times_start", type=float, default=2,
@@ -147,9 +147,11 @@ def main():
     if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
         config["n_time"] = config["sample_times_end"] - config["sample_times_start"] + 1
 
-    # Data quatities
+    # Data quantities
     obs_mask_list = []
     n_obs_list = []
+    n_unobs_list = []
+    val_mask_list = []
     for k in range(config["n_time"]):
         # Graph data
         if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
@@ -162,9 +164,16 @@ def main():
 
         # Number of observed nodes
         n_obs_list.append(torch.sum(graph_k.mask).to(torch.float32))
+
+        # Masked data for validation
+        val_mask = torch.logical_not(graph_k.mask)
+        val_mask_list.append(val_mask)
+        n_unobs_list.append(torch.sum(val_mask).to(torch.float32))
         
-    obs_mask_batch = torch.stack(obs_mask_list, dim=0)
-    n_obs_batch = torch.stack(n_obs_list, dim=0)
+    obs_mask_stack = torch.stack(obs_mask_list, dim=0)
+    n_obs_stack = torch.stack(n_obs_list, dim=0)
+    n_unobs_stack = torch.stack(n_unobs_list, dim=0)
+    val_mask_stack = torch.stack(val_mask_list, dim=0)
 
     # Initialize optimal parameters
     opt_params = ()
@@ -178,7 +187,7 @@ def main():
     opt_params += tuple(dgmrf.parameters())
 
     # Instatiate variational distribution
-    vi_dist = vi.VariationalDistBatch(config, graph_k, obs_mask_batch)
+    vi_dist = vi.VariationalDistBatch(config, graph_k, obs_mask_stack)
     opt_params += tuple(vi_dist.parameters())
 
     # Add noise std to opt_param if learn_noise_std == 1
@@ -216,69 +225,33 @@ def main():
 
         # Run samples through temporal model
         h = temporal_model(vi_samples.unsqueeze(3))
-        print(h.shape)
 
         # Run samples through spatial model
         vi_dist.sample_batch.x = h.reshape(-1,1)
         g = dgmrf(vi_dist.sample_batch)
-        print(g.shape)
+        g = g.reshape(config['n_time'], config['n_training_samples'], config['n_space'])
 
         # Compute log determinant of variational distribution
         vi_log_det = vi_dist.log_det()
 
-        # Compute ELBO components for time step k
+        # Compute ELBO components
         l1 = 0.5 * vi_log_det
-        l2 = -torch.sum(n_obs_batch * config["log_noise_std"])
+        l2 = -torch.sum(n_obs_stack * config["log_noise_std"])
         l3 = dgmrf.log_det()
-        print(torch.pow(h, 2).shape)
-        # l4 = -(1./(2. * config["n_training_samples"])) * torch.sum(torch.pow(g_k,2))
 
-        for k in range(config["n_time"]):
-
-            ## Data
-
-            # Graph data
-            if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
-                graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
-            else:
-                graph_k = dataset_dict["graph_y_" + str(k)]
-
-            graph_k.n_observed = torch.sum(graph_k.mask).to(torch.float32)
-
-            ## Train using variational distribution - i.e compute ELBO and use as loss function
-
-            # Feed samples through temporal model
-            h_k = h_batched[k]
-            print(h_k.shape)
-            print(h_k.reshape(-1,1).shape)
+        l4_per_time_step = -(1./(2. * config["n_training_samples"])) * torch.sum(torch.pow(g, 2), dim=[1, 2]) 
+        l4 = torch.sum(l4_per_time_step)
 
 
-            # Prepare vi samples after temporal transform for batched spatial model
-            vi_dist_k.sample_batch.x = h_k.reshape(-1,1)
+        l5_per_time_step = -(1./(2. * utils.noise_var(config)*config["n_training_samples"])) * \
+            torch.sum(torch.pow((vi_samples - obs_mask_stack.unsqueeze(1)), 2), dim=[1, 2])
+        l5 = torch.sum(l5_per_time_step)
 
-            # Feed samples through spatial model - SHOULD WE HAVE A DGMRF FOR EACH TIME STEP - dgmrf_k, see section 3.2.1??
-            dgmrf_k = dgmrf_list[k]
-            g_k = dgmrf_k(vi_dist_k.sample_batch)
-
-            # Compute log determinant of variational distribution
-            vi_log_det = vi_dist_k.log_det()
-
-            # Compute ELBO components for time step k
-            l1 = 0.5 * vi_log_det
-            l2 = -graph_k.n_observed * config["log_noise_std"]
-            l3 = dgmrf_k.log_det()
-            l4 = -(1./(2. * config["n_training_samples"])) * torch.sum(torch.pow(g_k,2))
-            l5 = -(1./(2. * utils.noise_var(config)*\
-                config["n_training_samples"])) * torch.sum(torch.pow(
-                    (vi_samples_list[k].squeeze(2) - graph_k.x.flatten()), 2)[:, graph_k.mask])
-            
-            # Update ELBO
-            elbo += l1 + l2 + l3 + l4 + l5
-
+        # ELBO
+        elbo += l1 + l2 + l3 + l4 + l5
+  
         # Compute normalized loss for this iteration
-        n_nodes = config["n_space"] * config["n_time"]
-        loss = (-1. / n_nodes) * elbo
-        
+        loss = (-1. / config["n_space"] * config["n_time"]) * elbo
         
         # Backpropagation
         loss.backward()
@@ -289,29 +262,22 @@ def main():
 
         # Print progress
         if True:#((iteration_i+1) % config["val_interval"]) == 0:
+            
             # Initialize validation error accumulator
             val_error_accum = 0.0
-            # Loop over time steps for validation
-            for k in range(config["n_time"]):
-                # Fetch the graph data for time step k
-                if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
-                    graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
-                else:
-                    graph_k = dataset_dict["graph_y_" + str(k)]
 
-                # Masked data for validation
-                val_mask = torch.logical_not(graph_k.mask)
-                graph_k.n_unobserved = torch.sum(val_mask).to(torch.float32)
+            # Sample from the variational distribution
+            val_samples = vi_dist.sample()
 
-                # Sample from the variational distribution
-                vi_dist_k = vi_dist_list[k]
-                val_samples = vi_dist_k.sample()
+            # Calculate validation error at each time step
+            val_error = (1./(config["n_training_samples"] * n_unobs_stack)) * \
+                torch.sum(torch.pow((val_samples - obs_mask_stack.unsqueeze(1)), 2) * val_mask_stack.unsqueeze(1), dim=[1, 2])
+    
+            # Ensure val_error is zero where n_unobs_stack is zero - i.e where val_error is nan due to division by zero
+            val_error = torch.where(torch.isnan(val_error), torch.zeros_like(val_error), val_error)
 
-                # Calculate validation error for current time step
-                if not graph_k.n_unobserved == 0:
-                    val_error = (1./(config["n_training_samples"]*graph_k.n_unobserved)) *\
-                                torch.sum(torch.pow((val_samples - graph_k.x.flatten()), 2)[:, val_mask])
-                    val_error_accum += val_error.item()
+            # Accumulate the validation error
+            val_error_accum = torch.sum(val_error)
 
             # Average validation error over time steps
             mean_val_error = val_error_accum / config["n_time"]
@@ -326,18 +292,14 @@ def main():
             # Save best parameters based on validation error
             if (best_loss is None) or (mean_loss < best_loss):
                 best_temporal_params = copy.deepcopy(temporal_model.state_dict())   
-                best_spatial_params = []
-                best_vi_params = []
-                for k in range(config["n_time"]):
-                    best_spatial_params.append(copy.deepcopy(dgmrf_list[k].state_dict()))
-                    best_vi_params.append(copy.deepcopy(vi_dist_list[k].state_dict()))
+                best_spatial_params = copy.deepcopy(dgmrf.state_dict())
+                best_vi_params = copy.deepcopy(vi_dist.state_dict())
                 best_loss = mean_loss
 
             if config["print_params"]:
                 # Print parameters of both temporal and spatial models
                 utils.print_params(temporal_model, config, model_type="temporal", header="--- Temporal Model parameters ---")
-                for k in range(config["n_time"]):
-                    utils.print_params(dgmrf_list[k], config, model_type="spatial", header="--- Spatial Model parameters (time step {}) ---".format(k))
+                utils.print_params(dgmrf, config, model_type="spatial", header="--- Spatial Model parameters ---")
 
 
     # # Summary
@@ -355,9 +317,8 @@ def main():
 
     # Reload best parameters
     temporal_model.load_state_dict(best_temporal_params)
-    for k in range(config["n_time"]):
-        dgmrf_list[k].load_state_dict(best_spatial_params[k])
-        vi_dist_list[k].load_state_dict(best_vi_params[k])
+    dgmrf.load_state_dict(best_spatial_params)
+    vi_dist.load_state_dict(best_vi_params)
     
     # # Print final parameters 
     # utils.print_params(dgmrf, config, model_type="spatial", header="Final Spatial Model Parameters:")
@@ -370,80 +331,80 @@ def main():
 
     # These posteriors are over y
     vi_evaluation = config["vi_eval"] or config["non_linear"]
-    if vi_evaluation:
-        # Use variational distribution in place of true posterior
-        print("Using variational distribution as posterior estimate ...")
-        # graph_post_mean, graph_post_std = vi_dist.posterior_estimate(graph_y, config)
-    else:
-        # Exact posterior inference
-        print("Running posterior inference ...")
-        # graph_post_mean, graph_post_std = inference.posterior_inference(dgmrf,
-        #         graph_y, config)
+    # if vi_evaluation:
+    #     # Use variational distribution in place of true posterior
+    #     print("Using variational distribution as posterior estimate ...")
+    #     # graph_post_mean, graph_post_std = vi_dist.posterior_estimate(graph_y, config)
+    # else:
+    #     # Exact posterior inference
+    #     print("Running posterior inference ...")
+    #     # graph_post_mean, graph_post_std = inference.posterior_inference(dgmrf,
+    #     #         graph_y, config)
 
-        # Start timing
-        start_time = time.time() 
+    #     # Start timing
+    #     start_time = time.time() 
 
-        post_mean_model = inference.posterior_inference(
-            temporal_model=temporal_model, 
-            dgmrf_list=dgmrf_list, 
-            vi_dist_list=vi_dist_list,
-            config=config,  
-            dataset_dict=dataset_dict
-        )
+    #     post_mean_model = inference.posterior_inference(
+    #         temporal_model=temporal_model, 
+    #         dgmrf_list=dgmrf_list, 
+    #         vi_dist_list=vi_dist_list,
+    #         config=config,  
+    #         dataset_dict=dataset_dict
+    #     )
         
-        # End timing
-        current_time = time.time()
-        elapsed_time = (current_time - start_time) / 60
-        print(f"Computation time for posterior inference CG method: {elapsed_time:.2f} minutes")
+    #     # End timing
+    #     current_time = time.time()
+    #     elapsed_time = (current_time - start_time) / 60
+    #     print(f"Computation time for posterior inference CG method: {elapsed_time:.2f} minutes")
 
-    # NEXT UP: 
-    # (1) Compute true posterior mean and std.-dev. for comparison - perhaps best to do so in advection_diffusion.py to include it in the dataset_dict
-    # (2) Compute metrics for evaluation - RMSE, CRPS, INT
+    # # NEXT UP: 
+    # # (1) Compute true posterior mean and std.-dev. for comparison - perhaps best to do so in advection_diffusion.py to include it in the dataset_dict
+    # # (2) Compute metrics for evaluation - RMSE, CRPS, INT
     
 
-    # Compute Metrics
-    if ("post_mean_true" in dataset_dict): #and ("graph_post_true_std" in dataset_dict):
+    # # Compute Metrics
+    # if ("post_mean_true" in dataset_dict): #and ("graph_post_true_std" in dataset_dict):
         
-        # Get true posterior mean from dataset_dict
-        post_mean_true = dataset_dict["post_mean_true"]
+    #     # Get true posterior mean from dataset_dict
+    #     post_mean_true = dataset_dict["post_mean_true"]
 
-        # Reshape post_mean_model to match shape of post_mean_true. Hence, from (n_time x n_nodes, 1) to (n_nodes, n_time) 
-        post_mean_model = post_mean_model.reshape(config["n_time"], config["n_space"]).transpose(0,1)
+    #     # Reshape post_mean_model to match shape of post_mean_true. Hence, from (n_time x n_nodes, 1) to (n_nodes, n_time) 
+    #     post_mean_model = post_mean_model.reshape(config["n_time"], config["n_space"]).transpose(0,1)
 
-        # Save post_mean_model to .pt file
-        torch.save(post_mean_model, 
-                   "results/post_mean_model_" + 
-                   str(config['n_layers']) + "_" + 
-                   str(config['n_layers_temporal']) + "_" + 
-                   str(config['n_iterations']) + "_" + 
-                   str(config['n_training_samples']) + "_" + 
-                   str(config['sample_times_start']) + "_" + 
-                   str(config['sample_times_end']) + 
-                   ".pt")
+    #     # Save post_mean_model to .pt file
+    #     torch.save(post_mean_model, 
+    #                "results/post_mean_model_" + 
+    #                str(config['n_layers']) + "_" + 
+    #                str(config['n_layers_temporal']) + "_" + 
+    #                str(config['n_iterations']) + "_" + 
+    #                str(config['n_training_samples']) + "_" + 
+    #                str(config['sample_times_start']) + "_" + 
+    #                str(config['sample_times_end']) + 
+    #                ".pt")
 
-        # Loop over time and compute metrics
-        mae_total = 0.0
-        rmse_total = 0.0
-        for k in range(config["n_time"]):
-            # Load graph
-            if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
-                graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
-            else:
-                graph_k = dataset_dict["graph_y_" + str(k)]
+    #     # Loop over time and compute metrics
+    #     mae_total = 0.0
+    #     rmse_total = 0.0
+    #     for k in range(config["n_time"]):
+    #         # Load graph
+    #         if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
+    #             graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
+    #         else:
+    #             graph_k = dataset_dict["graph_y_" + str(k)]
 
-            # Compute metrics for unobserved nodes
-            inverse_mask = torch.logical_not(graph_k.mask)
-            diff = (post_mean_model[:,k] - post_mean_true[:,k])[inverse_mask]
-            mae = torch.mean(torch.abs(diff))
-            rmse = torch.sqrt(torch.mean(torch.pow(diff, 2)))
-            mae_total += mae
-            rmse_total += rmse
+    #         # Compute metrics for unobserved nodes
+    #         inverse_mask = torch.logical_not(graph_k.mask)
+    #         diff = (post_mean_model[:,k] - post_mean_true[:,k])[inverse_mask]
+    #         mae = torch.mean(torch.abs(diff))
+    #         rmse = torch.sqrt(torch.mean(torch.pow(diff, 2)))
+    #         mae_total += mae
+    #         rmse_total += rmse
 
-            # Print metrics
-            print("Time step: {}, MAE: {:.7}, RMSE: {:.7}".format(k, mae, rmse))
+    #         # Print metrics
+    #         print("Time step: {}, MAE: {:.7}, RMSE: {:.7}".format(k, mae, rmse))
 
-        print("Total MAE of posterior mean: {:.7}".format(mae_total))
-        print("Total RMSE of posterior meam: {:.7}".format(rmse_total))
+    #     print("Total MAE of posterior mean: {:.7}".format(mae_total))
+    #     print("Total RMSE of posterior meam: {:.7}".format(rmse_total))
 
     
     # # Compare posterior mean with y
