@@ -52,7 +52,6 @@ def get_optimizer(name):
 def load_dataset(ds_name, ds_dir=constants.DS_DIR):
     ds_dir_path = os.path.join(ds_dir, ds_name)
 
-    # Pickled object might be on other device
     if torch.cuda.is_available():
         device = torch.device("cuda")
     else:
@@ -66,7 +65,7 @@ def load_dataset(ds_name, ds_dir=constants.DS_DIR):
             if ending == "pt":
                 graph_path = os.path.join(ds_dir_path, filename)
                 graph = torch.load(graph_path)
-                graphs[var_name] = graph
+                graphs[var_name] = graph.to(device)
 
     return graphs
 

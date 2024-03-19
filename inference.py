@@ -363,7 +363,7 @@ def posterior_inference(
 
         # Feed zeros through temporal model to get temporal bias b_f at time k
         zeros_temporal_format = torch.zeros(1, n_space, 1) 
-        b_f_k = temporal_model(zeros_temporal_format, with_bias=True, overwrite_n_samples=1) #  SHOULD b_f_k BE DIFFERENT FOR EACH TIME POINT?? 
+        b_f_k = temporal_model(zeros_temporal_format, with_bias=True) #  SHOULD b_f_k BE DIFFERENT FOR EACH TIME POINT?? 
 
         # Prepare b_f_k for spatial model
         graph_dummy.x = b_f_k.squeeze(0)

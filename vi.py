@@ -9,22 +9,21 @@ class VariationalDist(torch.nn.Module):
     def __init__(self, config, graph_y):
         super().__init__()
 
-        # Dimensionality of distribution (num_nodes of graph)
-        self.dim = graph_y.num_nodes
-
         # Standard amount of samples (must be fixed to be efficient)
         self.n_samples = config["n_training_samples"]
+        self.n_time = config["n_time"]
+        self.n_space = config["n_space"]
 
         # Variational distribution, Initialize with observed y
         self.mean_param = torch.nn.parameter.Parameter(graph_y.mask*graph_y.x[:,0])
         self.diag_param = torch.nn.parameter.Parameter(
-                2*torch.rand(self.dim) - 1.) # U(-1,1)
+                2*torch.rand(self.n_space) - 1.) # U(-1,1)
 
         self.layers = torch.nn.ModuleList([FlexLayer(graph_y, config, vi_layer=True)
                                            for _ in range(config["vi_layers"])])
         if config["vi_layers"] > 0:
             self.post_diag_param = torch.nn.parameter.Parameter(
-                2*torch.rand(self.dim) - 1.)
+                2*torch.rand(self.n_space) - 1.)
 
         # Reuse same batch with different x-values
         self.sample_batch = ptg.data.Batch.from_data_list([utils.new_graph(graph_y)
@@ -54,10 +53,12 @@ class VariationalDist(torch.nn.Module):
         return torch.nn.functional.softplus(self.coeff_diag_param)
 
     def sample(self):
-        standard_sample = torch.randn(self.n_samples, self.dim)
+        standard_sample = torch.randn(self.n_samples, self.n_space)
         ind_samples = self.std * standard_sample
 
         self.sample_batch.x = ind_samples.reshape(-1,1)  # Stack all
+        print("x: " + str(self.sample_batch.x.shape))
+        print("edge_index: " + str(self.sample_batch.edge_index.shape))
 
         for layer in self.layers:
             propagated = layer(self.sample_batch.x, self.sample_batch.edge_index,
@@ -123,38 +124,91 @@ class VariationalDist(torch.nn.Module):
         return graph_post_mean, graph_post_std
 
 
-def vi_loss(dgmrf, vi_dist, graph_y, config):
-    vi_samples = vi_dist.sample()
-    vi_log_det = vi_dist.log_det()
-    vi_dist.sample_batch.x = vi_samples.reshape(-1,1)
-    # Column vector of node values for all samples
+class VariationalDistBatch(torch.nn.Module):
+    def __init__(self, config, graph_y, mean_param):
+        super().__init__()
 
-    g = dgmrf(vi_dist.sample_batch) # Shape (n_training_samples*n_nodes, 1)
+        # Standard amount of samples (must be fixed to be efficient)
+        self.n_samples = config["n_training_samples"]
+        self.n_time = config["n_time"]
+        self.n_space = config["n_space"]
+        self.graph_y = graph_y
 
-    # Construct loss
-    l1 = 0.5*vi_log_det
-    l2 = -graph_y.n_observed*config["log_noise_std"]
-    l3 = dgmrf.log_det()
-    l4 = -(1./(2. * config["n_training_samples"])) * torch.sum(torch.pow(g,2))
+        # Variational distribution, Initialize with observed y
+        self.mean_param = torch.nn.parameter.Parameter(mean_param)
+        self.diag_param = torch.nn.parameter.Parameter(
+                2*torch.rand(self.n_space * self.n_time) - 1.) # U(-1,1)
 
-    if config["features"]:
-        vi_coeff_samples = vi_dist.sample_coeff(config["n_training_samples"])
-        # Mean from a VI sample (x + linear feature model)
-        vi_samples = vi_samples + vi_coeff_samples@graph_y.features.transpose(0,1)
+        # Share layers across time. Hence, only create config["vi_layers"] layers
+        self.layers = torch.nn.ModuleList([FlexLayer(graph_y, config, vi_layer=True)
+                                           for _ in range(config["vi_layers"])])
 
-        # Added term when using additional features
-        vi_coeff_log_det = vi_dist.log_det_coeff()
-        entropy_term = 0.5*vi_coeff_log_det
-        ce_term = vi_dist.ce_coeff()
+        if config["vi_layers"] > 0:
+            self.post_diag_param = torch.nn.parameter.Parameter(
+                2*torch.rand(self.n_space * self.n_time) - 1.)
 
-        l1 = l1 + entropy_term
-        l4 = l4 + ce_term
+        # Reuse same batch with different x-values
+        self.sample_batch = ptg.data.Batch.from_data_list([utils.new_graph(graph_y)
+                                    for _ in range(self.n_samples * self.n_time)])
 
-    l5 = -(1./(2. * utils.noise_var(config)*\
-        config["n_training_samples"]))*torch.sum(torch.pow(
-            (vi_samples - graph_y.x.flatten()), 2)[:, graph_y.mask])
+    @property
+    def std(self):
+        # Note: Only std before layers
+        return torch.nn.functional.softplus(self.diag_param)
+
+    @property
+    def post_diag(self):
+        # Diagonal of diagonal matrix applied after layers
+        return torch.nn.functional.softplus(self.post_diag_param)
+
+    def sample(self):
+        # Generate a batch of standard normal samples with an additional time dimension
+        standard_sample = torch.randn(self.n_time, self.n_samples, self.n_space)
+
+        # Apply the variational distribution's standard deviation, reshaping as needed
+        ind_samples = self.std * standard_sample.reshape(self.n_samples, self.n_space * self.n_time)
+
+        # Flatten ind_samples for batch processing across time steps
+        ind_samples_batch_format = ind_samples.reshape(-1, 1)
+
+        # Set the x-values of the batch to the individual samples
+        self.sample_batch.x = ind_samples_batch_format
+
+        for layer in self.layers:
+            propagated = layer(self.sample_batch.x, self.sample_batch.edge_index,
+                            transpose=False, with_bias=False)
+            self.sample_batch.x = propagated # Shape (n_space*n_graphs,1) where n_graphs = n_samples*n_time
+        
+        if self.layers:
+            # Apply post diagonal matrix, reshaping as needed
+            samples = self.post_diag * self.sample_batch.x.reshape(self.n_samples, -1)
+
+        # Reshape back to start shape (n_time, n_samples, n_space)
+        samples = self.sample_batch.x.reshape(self.n_time, self.n_samples, self.n_space)
+
+        # Reshape mean_param to match samples for correct broadcasting
+        mean_param_reshaped = self.mean_param.view(self.n_time, 1, self.n_space)
+        samples += mean_param_reshaped # Add mean last (not changed by layers)
+
+        return samples  # shape (n_time, n_samples, n_space)
     
-    elbo = l1 + l2 + l3 + l4 + l5
-    loss = (-1./graph_y.num_nodes)*elbo
-    return loss
+    def log_det(self):
+        # Assuming the log determinants from layers are the same for all time steps
+        layers_log_det = sum([layer.log_det() for layer in self.layers])
 
+        # Reshape std and post_diag to separate time and space dimensions
+        # Then compute the log det for each time step and sum across all space dimensions
+        # Finally, sum across all time steps
+        std_log_det = torch.sum(torch.log(self.std.view(self.n_time, self.n_space)), dim=1)
+        total_std_log_det = torch.sum(std_log_det)
+
+        if self.layers:
+            post_diag_log_det = torch.sum(torch.log(self.post_diag.view(self.n_time, self.n_space)), dim=1)
+            total_post_diag_log_det = torch.sum(post_diag_log_det)
+
+        # Combine them with the layers' log det, considering the factor of 2
+        total_log_det = 2.0 * (total_std_log_det + layers_log_det + total_post_diag_log_det)
+
+        return total_log_det
+
+    

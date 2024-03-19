@@ -13,28 +13,22 @@ class TemporalLayer(torch.nn.Module):
         self.v2 = torch.nn.Parameter(torch.tensor(0.3))  # v2^l, initialized to 0.3
         self.b_f = torch.nn.Parameter(torch.tensor(0.0))  # b_f^l, initialized to 0
 
-    def forward(self, x, with_bias=True, overwrite_n_samples=None):
-        
-        if overwrite_n_samples is None:
-            n_samples = self.n_samples
-        else:
-            n_samples = overwrite_n_samples
+    def forward(self, x, with_bias=True):
             
-
-        # Create identity matrix with batch dimension
-        identity_matrix = torch.eye(self.n_space, dtype=x.dtype).unsqueeze(0).repeat(n_samples, 1, 1)
+        # Create identity matrix
+        identity_matrix = torch.eye(self.n_space, dtype=x.dtype)
 
         # Create the matrix M with learnable parameters d, v1, v2
         M = self.create_matrix_M()
-        
-        # Convert M to a batched matrix
-        M = M.unsqueeze(0).repeat(n_samples, 1, 1) 
 
+        # Broadcasting happens here: the singleton dimension will be expanded to the batch size
         # Transition matrix F
-        F = identity_matrix + M 
+        F = identity_matrix + M.unsqueeze(0) 
 
-        # Batch matrix multiplication
-        result = torch.bmm(F, x)
+        # Batch matrix multiplication with broadcasting using torch.matmul
+        # torch.matmul supports broadcasting and can handle the case when F has a batch dimension of 1
+        # and x has a different batch size.
+        result = torch.matmul(F, x)
 
         # Add bias
         if with_bias:

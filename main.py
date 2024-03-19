@@ -21,15 +21,15 @@ def get_config():
     # Arguments of importance
     parser.add_argument("--n_layers", type=int,
                     help="Number of message passing layers", default=2) 
-    parser.add_argument("--n_layers_temporal", type=float, default=3,
+    parser.add_argument("--n_layers_temporal", type=float, default=2,
         help="Number of layers in temporal model")
     parser.add_argument("--n_iterations", type=int,
-        help="How many iterations to train for", default=1000) #1000
-    parser.add_argument("--n_training_samples", type=int, default=100, #10
+        help="How many iterations to train for", default=1) #1000
+    parser.add_argument("--n_training_samples", type=int, default=2, #10
         help="Number of samples to use for each iteration in training")
     parser.add_argument("--val_interval", type=int, default=10, 
         help="Evaluate model every val_interval:th iteration")
-    parser.add_argument("--sample_times_start", type=float, default=0,
+    parser.add_argument("--sample_times_start", type=float, default=2,
         help="Start sample time")
     parser.add_argument("--sample_times_end", type=float, default=3,
         help="End sample time")
@@ -140,53 +140,46 @@ def main():
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     # Load data
     dataset_dict = utils.load_dataset(config["dataset"])
-    for key in dataset_dict.keys():
-      dataset_dict[key] = dataset_dict[key].to(device)
-    
-    # Initialize spatial graph using the first time step - all time steps have the same spatial graph 
-    # graph_y = dataset_dict["graph_y_0"]
 
     # Time points
     if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
         config["n_time"] = config["sample_times_end"] - config["sample_times_start"] + 1
 
-    # Initialize optimal parameters
-    opt_params = ()
-
-    # Instatiate temporal model 
-    temporal_model = TemporalModel(config)
-    opt_params += tuple(temporal_model.parameters())
-    temporal_model.to(device)
-    
-    # Instatiate spatial model and variational distribution 
-    # Spatial model: an independent DGMRF for each time step, cf. section 3.2.1
-    # Variational distribution: an independent variational distribution for each time step, cf. section 3.3.1
-    dgmrf_list = []
-    vi_dist_list = []
+    # Data quatities
+    obs_mask_list = []
+    n_obs_list = []
     for k in range(config["n_time"]):
         # Graph data
         if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
             graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
         else:
             graph_k = dataset_dict["graph_y_" + str(k)]
+
+        # Observations masked
+        obs_mask_list.append(graph_k.mask * graph_k.x[:,0])
+
+        # Number of observed nodes
+        n_obs_list.append(torch.sum(graph_k.mask).to(torch.float32))
         
-        # Instantiate spatial model 
-        dgmrf_k = DGMRF(graph_k, config)
-        opt_params += tuple(dgmrf_k.parameters())
-        dgmrf_k.to(device)
+    obs_mask_batch = torch.stack(obs_mask_list, dim=0)
+    n_obs_batch = torch.stack(n_obs_list, dim=0)
 
-        # Instantiate vi_dist for each time step
-        vi_dist_k = vi.VariationalDist(config, graph_k)
-        opt_params += tuple(vi_dist_k.parameters())
-        vi_dist_k.to(device)
+    # Initialize optimal parameters
+    opt_params = ()
 
-        # Append to list
-        dgmrf_list.append(dgmrf_k)
-        vi_dist_list.append(vi_dist_k)
+    # Instatiate temporal model.  
+    temporal_model = TemporalModel(config)
+    opt_params += tuple(temporal_model.parameters())
+    
+    # Instatiate spatial model
+    dgmrf = DGMRF(graph_k, config)
+    opt_params += tuple(dgmrf.parameters())
+
+    # Instatiate variational distribution
+    vi_dist = vi.VariationalDistBatch(config, graph_k, obs_mask_batch)
+    opt_params += tuple(vi_dist.parameters())
 
     # Add noise std to opt_param if learn_noise_std == 1
     config["log_noise_std"] = torch.log(torch.tensor(config["noise_std"]))
@@ -216,6 +209,30 @@ def main():
         optimizer.zero_grad()
         elbo = torch.zeros(1)
 
+        ## Train using variational distribution - i.e compute ELBO and use as loss function
+
+        # Sample from variational distribution
+        vi_samples = vi_dist.sample()
+
+        # Run samples through temporal model
+        h = temporal_model(vi_samples.unsqueeze(3))
+        print(h.shape)
+
+        # Run samples through spatial model
+        vi_dist.sample_batch.x = h.reshape(-1,1)
+        g = dgmrf(vi_dist.sample_batch)
+        print(g.shape)
+
+        # Compute log determinant of variational distribution
+        vi_log_det = vi_dist.log_det()
+
+        # Compute ELBO components for time step k
+        l1 = 0.5 * vi_log_det
+        l2 = -torch.sum(n_obs_batch * config["log_noise_std"])
+        l3 = dgmrf.log_det()
+        print(torch.pow(h, 2).shape)
+        # l4 = -(1./(2. * config["n_training_samples"])) * torch.sum(torch.pow(g_k,2))
+
         for k in range(config["n_time"]):
 
             ## Data
@@ -230,16 +247,11 @@ def main():
 
             ## Train using variational distribution - i.e compute ELBO and use as loss function
 
-            # Sample from variational distribution
-            vi_dist_k = vi_dist_list[k]
-            vi_samples = vi_dist_k.sample()
-
-            # Prepare vi samples for batched temporal model
-            # Hence, reshape to (n_samples, n_nodes, 1) for torch.bmm in temporal.py to work correctly
-            vi_samples_temporal_batch_format = vi_samples.unsqueeze(2)
-
             # Feed samples through temporal model
-            h_k = temporal_model(vi_samples_temporal_batch_format)
+            h_k = h_batched[k]
+            print(h_k.shape)
+            print(h_k.reshape(-1,1).shape)
+
 
             # Prepare vi samples after temporal transform for batched spatial model
             vi_dist_k.sample_batch.x = h_k.reshape(-1,1)
@@ -258,7 +270,7 @@ def main():
             l4 = -(1./(2. * config["n_training_samples"])) * torch.sum(torch.pow(g_k,2))
             l5 = -(1./(2. * utils.noise_var(config)*\
                 config["n_training_samples"])) * torch.sum(torch.pow(
-                    (vi_samples - graph_k.x.flatten()), 2)[:, graph_k.mask])
+                    (vi_samples_list[k].squeeze(2) - graph_k.x.flatten()), 2)[:, graph_k.mask])
             
             # Update ELBO
             elbo += l1 + l2 + l3 + l4 + l5
@@ -266,6 +278,7 @@ def main():
         # Compute normalized loss for this iteration
         n_nodes = config["n_space"] * config["n_time"]
         loss = (-1. / n_nodes) * elbo
+        
         
         # Backpropagation
         loss.backward()
