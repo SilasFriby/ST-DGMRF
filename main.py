@@ -24,9 +24,9 @@ def get_config():
     parser.add_argument("--n_layers_temporal", type=int,
         help="Number of layers in temporal model", default=2)
     parser.add_argument("--n_iterations", type=int,
-        help="How many iterations to train for", default=100)
+        help="How many iterations to train for", default=1)
     parser.add_argument("--n_training_samples", type=int,
-        help="Number of samples to use for each iteration in training", default=10)
+        help="Number of samples to use for each iteration in training", default=2)
     parser.add_argument("--val_interval", type=int, default=10, 
         help="Evaluate model every val_interval:th iteration")
     parser.add_argument("--sample_times_start", type=float, default=2,
@@ -220,16 +220,25 @@ def main():
 
         ## Train using variational distribution - i.e compute ELBO and use as loss function
 
-        # Sample from variational distribution
+        # Sample from variational distribution - shape [n_time, n_samples, n_space]
         vi_samples = vi_dist.sample()
 
-        # Run samples through temporal model
-        h = temporal_model(vi_samples.unsqueeze(3))
+        # Run samples through temporal model: 
+        # f(x) = Fx + b_f = h, which is a vector with elements h_k = x_k - F_k x_{k+1} + b_f_k for k = 0, ..., n-2 
+        # and h_{n-1} = x_{n-1} + b_f_{n-1}
+        # !! WE ASSUME THAT F_k is equal for all k and that the layers in F_k are shared across time steps !!
+        x_k = vi_samples[:-1] # [:-1] remove last time step
+        F_k_x_k_plus_1 = temporal_model(vi_samples[1:].unsqueeze(3)) # [1:] remove first time step
+        x_n_minus_1 = vi_samples[-1].unsqueeze(0) # [-1] last time step
+        h = torch.cat((x_k - F_k_x_k_plus_1.squeeze(3), x_n_minus_1))
 
-        # Run samples through spatial model
-        vi_dist.sample_batch.x = h.reshape(-1,1)
+
+        # Run F-transformed samples, h, through spatial model:
+        # s(h) = Sh + b_s, which is a vector with elements s(h)_k = S_k h_k + b_s_k for k = 0, ..., n_time-1
+        # !! WE ASSUME THAT S_k is equal for all k and that the layers in S_k are shared across time steps !!
+        vi_dist.sample_batch.x = h.reshape(-1,1) # Reshape h to [n_time * n_samples * n_space, 1]
         g = dgmrf(vi_dist.sample_batch)
-        g = g.reshape(config['n_time'], config['n_training_samples'], config['n_space'])
+        g = g.reshape(config['n_time'], config['n_training_samples'], config['n_space']) # Reshape g to [n_time, n_samples, n_space]
 
         # Compute log determinant of variational distribution
         vi_log_det = vi_dist.log_det()
@@ -300,20 +309,11 @@ def main():
                 # Print parameters of both temporal and spatial models
                 utils.print_params(temporal_model, config, model_type="temporal", header="--- Temporal Model parameters ---")
                 utils.print_params(dgmrf, config, model_type="spatial", header="--- Spatial Model parameters ---")
-
-
-    # # Summary
-    # print("n_spatial_layers: ", config["n_layers"])
-    # print("n_temporal_layers: ", config["n_layers_temporal"])
-    # print("n_iterations: ", config["n_iterations"])
-    # print("n_training_samples: ", config["n_training_samples"])
-    # print("Iteration: {}, mean loss: {:.6}, mean val error: {:.6}".format(
-    #     (iteration_i+1), mean_loss, mean_val_error))
     
     # End timing
     current_time = time.time()
-    elapsed_time = (current_time - start_time) / 60
-    print(f"Computation time for Stochastic Gradient Descent method: {elapsed_time:.2f} minutes")
+    elapsed_time_training = (current_time - start_time) / 60
+    print(f"Computation time for Stochastic Gradient Descent method: {elapsed_time_training:.2f} minutes")
 
     # Reload best parameters
     temporal_model.load_state_dict(best_temporal_params)
@@ -331,80 +331,80 @@ def main():
 
     # These posteriors are over y
     vi_evaluation = config["vi_eval"] or config["non_linear"]
-    # if vi_evaluation:
-    #     # Use variational distribution in place of true posterior
-    #     print("Using variational distribution as posterior estimate ...")
-    #     # graph_post_mean, graph_post_std = vi_dist.posterior_estimate(graph_y, config)
-    # else:
-    #     # Exact posterior inference
-    #     print("Running posterior inference ...")
-    #     # graph_post_mean, graph_post_std = inference.posterior_inference(dgmrf,
-    #     #         graph_y, config)
+    if vi_evaluation:
+        # Use variational distribution in place of true posterior
+        print("Using variational distribution as posterior estimate ...")
+        # graph_post_mean, graph_post_std = vi_dist.posterior_estimate(graph_y, config)
+    else:
+        # Exact posterior inference
+        print("Running posterior inference ...")
+        # graph_post_mean, graph_post_std = inference.posterior_inference(dgmrf,
+        #         graph_y, config)
 
-    #     # Start timing
-    #     start_time = time.time() 
+        # Start timing
+        start_time = time.time() 
 
-    #     post_mean_model = inference.posterior_inference(
-    #         temporal_model=temporal_model, 
-    #         dgmrf_list=dgmrf_list, 
-    #         vi_dist_list=vi_dist_list,
-    #         config=config,  
-    #         dataset_dict=dataset_dict
-    #     )
+        post_mean_model = inference.posterior_inference(
+            temporal_model=temporal_model, 
+            dgmrf_list=dgmrf_list, 
+            vi_dist_list=vi_dist_list,
+            config=config,  
+            dataset_dict=dataset_dict
+        )
         
-    #     # End timing
-    #     current_time = time.time()
-    #     elapsed_time = (current_time - start_time) / 60
-    #     print(f"Computation time for posterior inference CG method: {elapsed_time:.2f} minutes")
+        # End timing
+        current_time = time.time()
+        elapsed_time = (current_time - start_time) / 60
+        print(f"Computation time for posterior inference CG method: {elapsed_time:.2f} minutes")
 
-    # # NEXT UP: 
-    # # (1) Compute true posterior mean and std.-dev. for comparison - perhaps best to do so in advection_diffusion.py to include it in the dataset_dict
-    # # (2) Compute metrics for evaluation - RMSE, CRPS, INT
+    # NEXT UP: 
+    # (1) Compute true posterior mean and std.-dev. for comparison - perhaps best to do so in advection_diffusion.py to include it in the dataset_dict
+    # (2) Compute metrics for evaluation - RMSE, CRPS, INT
     
 
-    # # Compute Metrics
-    # if ("post_mean_true" in dataset_dict): #and ("graph_post_true_std" in dataset_dict):
+    # Compute Metrics
+    if ("post_mean_true" in dataset_dict): #and ("graph_post_true_std" in dataset_dict):
         
-    #     # Get true posterior mean from dataset_dict
-    #     post_mean_true = dataset_dict["post_mean_true"]
+        # Get true posterior mean from dataset_dict
+        post_mean_true = dataset_dict["post_mean_true"]
 
-    #     # Reshape post_mean_model to match shape of post_mean_true. Hence, from (n_time x n_nodes, 1) to (n_nodes, n_time) 
-    #     post_mean_model = post_mean_model.reshape(config["n_time"], config["n_space"]).transpose(0,1)
+        # Reshape post_mean_model to match shape of post_mean_true. Hence, from (n_time x n_nodes, 1) to (n_nodes, n_time) 
+        post_mean_model = post_mean_model.reshape(config["n_time"], config["n_space"]).transpose(0,1)
 
-    #     # Save post_mean_model to .pt file
-    #     torch.save(post_mean_model, 
-    #                "results/post_mean_model_" + 
-    #                str(config['n_layers']) + "_" + 
-    #                str(config['n_layers_temporal']) + "_" + 
-    #                str(config['n_iterations']) + "_" + 
-    #                str(config['n_training_samples']) + "_" + 
-    #                str(config['sample_times_start']) + "_" + 
-    #                str(config['sample_times_end']) + 
-    #                ".pt")
+        # Save post_mean_model to .pt file
+        torch.save(post_mean_model, 
+                   "results/post_mean_model_" + 
+                   str(config['n_layers']) + "_" + 
+                   str(config['n_layers_temporal']) + "_" + 
+                   str(config['n_iterations']) + "_" + 
+                   str(config['n_training_samples']) + "_" + 
+                   str(config['sample_times_start']) + "_" + 
+                   str(config['sample_times_end']) + 
+                   ".pt")
 
-    #     # Loop over time and compute metrics
-    #     mae_total = 0.0
-    #     rmse_total = 0.0
-    #     for k in range(config["n_time"]):
-    #         # Load graph
-    #         if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
-    #             graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
-    #         else:
-    #             graph_k = dataset_dict["graph_y_" + str(k)]
+        # Loop over time and compute metrics
+        mae_total = 0.0
+        rmse_total = 0.0
+        for k in range(config["n_time"]):
+            # Load graph
+            if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
+                graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
+            else:
+                graph_k = dataset_dict["graph_y_" + str(k)]
 
-    #         # Compute metrics for unobserved nodes
-    #         inverse_mask = torch.logical_not(graph_k.mask)
-    #         diff = (post_mean_model[:,k] - post_mean_true[:,k])[inverse_mask]
-    #         mae = torch.mean(torch.abs(diff))
-    #         rmse = torch.sqrt(torch.mean(torch.pow(diff, 2)))
-    #         mae_total += mae
-    #         rmse_total += rmse
+            # Compute metrics for unobserved nodes
+            inverse_mask = torch.logical_not(graph_k.mask)
+            diff = (post_mean_model[:,k] - post_mean_true[:,k])[inverse_mask]
+            mae = torch.mean(torch.abs(diff))
+            rmse = torch.sqrt(torch.mean(torch.pow(diff, 2)))
+            mae_total += mae
+            rmse_total += rmse
 
-    #         # Print metrics
-    #         print("Time step: {}, MAE: {:.7}, RMSE: {:.7}".format(k, mae, rmse))
+            # Print metrics
+            print("Time step: {}, MAE: {:.7}, RMSE: {:.7}".format(k, mae, rmse))
 
-    #     print("Total MAE of posterior mean: {:.7}".format(mae_total))
-    #     print("Total RMSE of posterior meam: {:.7}".format(rmse_total))
+        print("Total MAE of posterior mean: {:.7}".format(mae_total))
+        print("Total RMSE of posterior meam: {:.7}".format(rmse_total))
 
     
     # # Compare posterior mean with y

@@ -108,7 +108,7 @@ def regularized_cg(
 def cg_solve(
         rhs, 
         temporal_model, 
-        dgmrf_list, 
+        dgmrf, 
         config, 
         dataset_dict, 
         rtol, 
@@ -136,14 +136,11 @@ def cg_solve(
 
         ## Q_k = S_k^T @ S_k
 
-        # Spatial model at time k
-        dgmrf_k = dgmrf_list[k]
-
         # Initialize S_k as an identity matrix
         S_k = torch.eye(n_space)
 
         # Multiply the S matrices of each spatial layer to get the final S_k - !!!!ONLY CORRECT IF THERE ARE NO NON-LINEAR LAYERS!!!!
-        for layer in dgmrf_k.layers:
+        for layer in dgmrf.layers:
             S_layer = layer.create_S_matrix(degree_matrix=dataset_dict['degree_matrix'], 
                                             adjacency_matrix=dataset_dict['adjacency_matrix'])
             S_k = torch.matmul(S_layer, S_k)  # Update F by multiplying by the new F_layer
@@ -332,8 +329,8 @@ def sample_posterior(n_samples, dgmrf, graph_y, config, rtol, verbose=False):
 @torch.no_grad()
 def posterior_inference(
     temporal_model, 
-    dgmrf_list, 
-    vi_dist_list, 
+    dgmrf, 
+    vi_dist, 
     config, 
     dataset_dict
 ):
@@ -354,6 +351,8 @@ def posterior_inference(
     # Initialize graph_dummy for spatial model
     graph_dummy = utils.new_graph(dataset_dict["graph_y_0"], new_x=torch.zeros(n_space, 1))
 
+
+
     for k in range(n_time):
         # Load graph at time k
         if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
@@ -362,15 +361,14 @@ def posterior_inference(
             graph_k = dataset_dict["graph_y_" + str(k)]
 
         # Feed zeros through temporal model to get temporal bias b_f at time k
-        zeros_temporal_format = torch.zeros(1, n_space, 1) 
+        zeros_temporal_format = torch.zeros(1, 1, n_space, 1) 
         b_f_k = temporal_model(zeros_temporal_format, with_bias=True) #  SHOULD b_f_k BE DIFFERENT FOR EACH TIME POINT?? 
 
         # Prepare b_f_k for spatial model
         graph_dummy.x = b_f_k.squeeze(0)
 
         # Feed b_f_k through spatial model to obtain model bias at time k b_theta_k
-        dgmrf_k = dgmrf_list[k]
-        b_theta_k = dgmrf_k(graph_dummy, with_bias=True) # b_theta_k = S_k @ b_f_k + b_s_k
+        b_theta_k = dgmrf(graph_dummy, with_bias=True) # b_theta_k = S_k @ b_f_k + b_s_k
         
         # S @ c = -b_theta, cf. equation (10)
         S_c_k = -b_theta_k
@@ -379,7 +377,7 @@ def posterior_inference(
 
         # At time k
         graph_dummy.x = S_c_k
-        Q_c_k = dgmrf_k(graph_dummy, transpose=True, with_bias=False) # S^T @ S @ c
+        Q_c_k = dgmrf(graph_dummy, transpose=True, with_bias=False) # S^T @ S @ c
 
         # Append Q_c_k
         if k == 0:
