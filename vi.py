@@ -57,8 +57,6 @@ class VariationalDist(torch.nn.Module):
         ind_samples = self.std * standard_sample
 
         self.sample_batch.x = ind_samples.reshape(-1,1)  # Stack all
-        print("x: " + str(self.sample_batch.x.shape))
-        print("edge_index: " + str(self.sample_batch.edge_index.shape))
 
         for layer in self.layers:
             propagated = layer(self.sample_batch.x, self.sample_batch.edge_index,
@@ -125,7 +123,7 @@ class VariationalDist(torch.nn.Module):
 
 
 class VariationalDistBatch(torch.nn.Module):
-    def __init__(self, config, graph_y, mean_param):
+    def __init__(self, config, graph_y, mean_param_init):
         super().__init__()
 
         # Standard amount of samples (must be fixed to be efficient)
@@ -135,7 +133,7 @@ class VariationalDistBatch(torch.nn.Module):
         self.graph_y = graph_y
 
         # Variational distribution, Initialize with observed y
-        self.mean_param = torch.nn.parameter.Parameter(mean_param)
+        self.mean_param = torch.nn.parameter.Parameter(mean_param_init)
         self.diag_param = torch.nn.parameter.Parameter(
                 2*torch.rand(self.n_space * self.n_time) - 1.) # U(-1,1)
 

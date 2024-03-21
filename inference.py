@@ -16,13 +16,13 @@ def regularized_cg(
         x0, 
         rtol,
         nu0=10.0,  
-        max_outer_iter=2, 
-        max_inner_iter=3, 
+        max_outer_iter=1, 
+        max_inner_iter=200, 
         nu_decay_factor=10.0, 
         verbose=False):
     
     # Initial values
-    x_i = x0 
+    x_i = x0.to(torch.float64) 
     nu = nu0
 
     ## Solve the regularized linear system (νI + A)x = νx^(i) + b
@@ -34,11 +34,11 @@ def regularized_cg(
         x_unbatched = x.squeeze(0)
         A = A_func(x_unbatched)
         A_batched = A.unsqueeze(0)
-        return nu * x + A_batched
+        return A_batched #nu * x + A_batched
 
     # Right-hand side        
     def rhs(x, nu): 
-        return nu * x + B  
+        return B #nu * x + B  
 
     # # Divergence counter
     # count_divergence = 0
@@ -114,7 +114,7 @@ def cg_solve(
         cg_start_guess,
         graph_dummy, 
         mask_stack,
-        verbose=False):
+        verbose=False,):
     
     #### Conjugate Gradient
     #### Solve Omega_plus x = rhs, where Omega_plus = F^T @ Q @ F + (1/sigma^2) * I_masked, see equation (17)
@@ -190,8 +190,6 @@ def cg_solve(
                               x0=cg_start_guess, 
                               rtol=rtol, 
                               verbose=verbose)
-    
-
 
     return solution.to(torch.float32)
 
@@ -296,7 +294,7 @@ def posterior_inference(
 
     ## (5) Noise obs term (1/sigma^2)masked_obs
     
-    masked_obs = obs_mask_stack.reshape(-1,1) # shape [n_time * n_space, 1]
+    masked_obs = obs_mask_stack.reshape(-1,1).to(torch.float64) # shape [n_time * n_space, 1]
     noise_obs_term = (1./utils.noise_var(config)) * masked_obs
 
     ## (6) RHS = Omega_mu + noise_obs_term
@@ -320,6 +318,8 @@ def posterior_inference(
                          graph_dummy=graph_dummy,
                          mask_stack=mask_stack,
                          verbose=True)[0]
+    
+
     
     # graph_post_mean = utils.new_graph(graph_y, new_x=post_mean)
 

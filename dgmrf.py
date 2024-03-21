@@ -32,5 +32,3 @@ class DGMRF(torch.nn.Module):
         # Sum log-determinants of all layers and multiply by n_time. Correct when S_k is equal for all k!!
         return self.n_time * sum([layer.log_det() for layer in self.layers])
     
-    def get_bias(self):
-        return sum([layer.get_bias() for layer in self.layers])

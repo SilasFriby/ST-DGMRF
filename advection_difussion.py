@@ -284,8 +284,8 @@ torch.save(torch.tensor(A, dtype=torch.float), 'dataset/advection_diffusion/adja
 ## Create Q as sparse matrix - diagonal block matrix with Q_k in every block
 
 # Number of nodes
-n_nodes_spatial = n_lattice**2
-n_total = n_time * n_nodes_spatial
+n_space = n_lattice**2
+n_total = n_time * n_space
 
 # Initialize lists for row indices, column indices, and values
 row_indices = []
@@ -294,10 +294,10 @@ values = []
 
 for k in tqdm(range(n_time)):
     # Calculate the starting index for this block
-    start_index = k * n_nodes_spatial
+    start_index = k * n_space
     
-    for i in range(n_nodes_spatial):
-        for j in range(n_nodes_spatial):
+    for i in range(n_space):
+        for j in range(n_space):
             # Calculate the global row and column indices
             row_idx = start_index + i
             col_idx = start_index + j
@@ -316,7 +316,7 @@ col_indices = np.array(col_indices)
 values = np.array(values)
 
 # Create the CSR matrix
-size = (n_time * n_nodes_spatial, n_time * n_nodes_spatial)
+size = (n_time * n_space, n_time * n_space)
 Q = csr_matrix((values, (row_indices, col_indices)), shape=size)
 
 
@@ -334,17 +334,17 @@ F_lil = lil_matrix((n_total, n_total))
 F_T_lil = lil_matrix((n_total, n_total))
 
 for k in tqdm(range(n_time)):
-    row_start = k * n_nodes_spatial
-    row_end = (k + 1) * n_nodes_spatial
+    row_start = k * n_space
+    row_end = (k + 1) * n_space
     
     # Identity blocks for F and F^T
-    F_lil[row_start:row_end, row_start:row_end] = np.eye(n_nodes_spatial)
-    F_T_lil[row_start:row_end, row_start:row_end] = np.eye(n_nodes_spatial)
+    F_lil[row_start:row_end, row_start:row_end] = np.eye(n_space)
+    F_T_lil[row_start:row_end, row_start:row_end] = np.eye(n_space)
     
     # -F_k blocks for F and -F_k^T blocks for F^T
     if k < n_time - 1:
-        F_lil[row_end:row_end + n_nodes_spatial, row_start:row_end] = -F_k_lil
-        F_T_lil[row_start:row_end, row_end:row_end + n_nodes_spatial] = -F_k_T_lil
+        F_lil[row_end:row_end + n_space, row_start:row_end] = -F_k_lil
+        F_T_lil[row_start:row_end, row_end:row_end + n_space] = -F_k_T_lil
 
 # Convert LIL matrices to CSR for efficient storage and operations
 F = F_lil.tocsr()
@@ -379,25 +379,32 @@ Omega = F_T @ Q @ F
 
 Omega_plus = Omega + mask_noise_term_matrix
 
-## Compute rhs of equation for posterior mean = Omega * mu + mask_noise_term * y
-## mu is zero in the example, hence rhs consists of only mask_noise_term * y
+## Compute rhs of equation for posterior mean = Omega * mu + (1/sigma^2)masked_obs
+## mu is zero (CORRECT?????) in the example, hence rhs consists of only (1/sigma^2)masked_obs
 
 # Compute rhs second term mask_noise_term * y
 for t in range(n_time):
-    y_t = obs_matrix[:, t].flatten()
+    obs_t = obs_matrix[:, t].flatten()
     mask_t = ~np.isnan(rho_matrix_mask[:, t]).flatten()
-    mask_y_t = mask_t * y_t
+    mask_obs_t = mask_t * obs_t
     if t == 0:
-        mask_y = mask_y_t
+        mask_obs = mask_obs_t
     else: # append
-        mask_y = np.append(mask_y, mask_y_t)
+        mask_obs = np.append(mask_obs, mask_obs_t)
 
-## Solve the linear system Omega_plus * x = b for x, which represents the posterior mean in this context
+## RHS
 
-true_posterior_mean = spsolve(Omega_plus, mask_y)
+Omega_mu = 0 # Zero in the example since mu is zero
+noise_obs_term = (1./sigma_obs**2) * mask_obs
+rhs = Omega_mu + noise_obs_term     
+
+
+## Solve the linear system Omega_plus * x = rhs for x, which represents the posterior mean in this context
+
+true_posterior_mean = spsolve(Omega_plus, rhs)
 
 # Convert x_posterior_mean to tensor matrix with n_time columns
-true_posterior_mean_matrix = true_posterior_mean.reshape(n_nodes_spatial, n_time, order='F')
+true_posterior_mean_matrix = true_posterior_mean.reshape(n_space, n_time, order='F')
 
 # Save the posterior mean as a tensor
 true_posterior_mean_tensor = torch.tensor(true_posterior_mean_matrix, dtype=torch.float)

@@ -22,14 +22,14 @@ def get_config():
     parser.add_argument("--n_layers", type=int,
                     help="Number of message passing layers", default=2) 
     parser.add_argument("--n_layers_temporal", type=int,
-        help="Number of layers in temporal model", default=2)
+        help="Number of layers in temporal model", default=0)
     parser.add_argument("--n_iterations", type=int,
-        help="How many iterations to train for", default=1)
+        help="How many iterations to train for", default=1000)
     parser.add_argument("--n_training_samples", type=int,
-        help="Number of samples to use for each iteration in training", default=1)
+        help="Number of samples to use for each iteration in training", default=10)
     parser.add_argument("--val_interval", type=int, default=10, 
         help="Evaluate model every val_interval:th iteration")
-    parser.add_argument("--sample_times_start", type=float, default=2,
+    parser.add_argument("--sample_times_start", type=float, default=3,
         help="Start sample time")
     parser.add_argument("--sample_times_end", type=float, default=3,
         help="End sample time")
@@ -148,6 +148,7 @@ def main():
         config["n_time"] = config["sample_times_end"] - config["sample_times_start"] + 1
 
     # Data quantities
+    obs_list = []
     mask_list = []
     obs_mask_list = []
     n_obs_list = []
@@ -159,6 +160,9 @@ def main():
             graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
         else:
             graph_k = dataset_dict["graph_y_" + str(k)]
+
+        # Observations
+        obs_list.append(graph_k.x[:,0])
 
         # Mask
         mask_list.append(graph_k.mask)
@@ -174,6 +178,7 @@ def main():
         val_mask_list.append(val_mask)
         n_unobs_list.append(torch.sum(val_mask).to(torch.float32))
         
+    obs_stack = torch.stack(obs_list, dim=0)    
     mask_stack = torch.stack(mask_list, dim=0)    
     obs_mask_stack = torch.stack(obs_mask_list, dim=0)
     n_obs_stack = torch.stack(n_obs_list, dim=0)
@@ -192,8 +197,9 @@ def main():
     opt_params += tuple(dgmrf.parameters())
 
     # Instatiate variational distribution
-    vi_dist = vi.VariationalDistBatch(config, graph_k, obs_mask_stack)
+    vi_dist = vi.VariationalDistBatch(config, graph_k, mean_param_init=obs_mask_stack.clone()) # Initialize mean parameter with observations. Using clone such that obs_mask_stack is not affected during training
     opt_params += tuple(vi_dist.parameters())
+    
 
     # Add noise std to opt_param if learn_noise_std == 1
     config["log_noise_std"] = torch.log(torch.tensor(config["noise_std"]))
@@ -218,6 +224,8 @@ def main():
     # Start timing
     start_time = time.time()  
 
+    
+
     for iteration_i in range(config["n_iterations"]):
 
         optimizer.zero_grad()
@@ -229,8 +237,7 @@ def main():
         vi_samples = vi_dist.sample()
 
         # Run samples through temporal model: 
-        # f(x) = Fx + b_f = h, which is a vector with elements h_0 = x_0 + b_f_0
-        # and h_k = x_{k+1} - F_k x_k + b_f_k for k = 1, ..., n-1  
+        # f(x) = Fx + b_f = h, which is a vector with elements h_0 = x_0 + b_f_0 and h_k = x_{k+1} - F_k x_k + b_f_k for k = 1, ..., n-1  
         # !! WE ASSUME THAT F_k is equal for all k and that the layers in F_k are shared across time steps !!
         x_k_plus_1 = vi_samples[1:] # [1:] exclude first time step
         F_k_x_k = temporal_model(vi_samples[:-1].unsqueeze(3)) # [:-1] exclude last time step
@@ -250,7 +257,7 @@ def main():
 
         # Compute ELBO components
         l1 = 0.5 * vi_log_det
-        l2 = -torch.sum(n_obs_stack * config["log_noise_std"])
+        l2 = torch.sum(-n_obs_stack * config["log_noise_std"])
         l3 = dgmrf.log_det()
 
         l4_per_time_step = -(1./(2. * config["n_training_samples"])) * torch.sum(torch.pow(g, 2), dim=[1, 2]) 
@@ -258,14 +265,15 @@ def main():
 
 
         l5_per_time_step = -(1./(2. * utils.noise_var(config)*config["n_training_samples"])) * \
-            torch.sum(torch.pow((vi_samples - obs_mask_stack.unsqueeze(1)), 2), dim=[1, 2])
+            torch.sum(torch.pow((vi_samples - obs_stack.unsqueeze(1)), 2)[:,:, graph_k.mask], dim=[1, 2])
         l5 = torch.sum(l5_per_time_step)
 
         # ELBO
         elbo += l1 + l2 + l3 + l4 + l5
   
         # Compute normalized loss for this iteration
-        loss = (-1. / config["n_space"] * config["n_time"]) * elbo
+        n_total = config["n_space"] * config["n_time"]
+        loss = (-1. / n_total) * elbo
         
         # Backpropagation
         loss.backward()
@@ -286,7 +294,7 @@ def main():
             # Calculate validation error at each time step
             val_error = (1./(config["n_training_samples"] * n_unobs_stack)) * \
                 torch.sum(torch.pow((val_samples - obs_mask_stack.unsqueeze(1)), 2) * val_mask_stack.unsqueeze(1), dim=[1, 2])
-    
+
             # Ensure val_error is zero where n_unobs_stack is zero - i.e where val_error is nan due to division by zero
             val_error = torch.where(torch.isnan(val_error), torch.zeros_like(val_error), val_error)
 
@@ -314,17 +322,17 @@ def main():
                 # Print parameters of both temporal and spatial models
                 utils.print_params(temporal_model, config, model_type="temporal", header="--- Temporal Model parameters ---")
                 utils.print_params(dgmrf, config, model_type="spatial", header="--- Spatial Model parameters ---")
-    
+
     # End timing
     current_time = time.time()
     elapsed_time_training = (current_time - start_time) / 60
     print(f"Computation time for Stochastic Gradient Descent method: {elapsed_time_training:.2f} minutes")
-
+   
     # Reload best parameters
     temporal_model.load_state_dict(best_temporal_params)
     dgmrf.load_state_dict(best_spatial_params)
     vi_dist.load_state_dict(best_vi_params)
-    
+
     # # Print final parameters 
     # utils.print_params(dgmrf, config, model_type="spatial", header="Final Spatial Model Parameters:")
     # utils.print_params(temporal_model, config, model_type="temporal", header="Final Temporal Model Parameters:")
@@ -352,6 +360,7 @@ def main():
         # Initialize graph_dummy for spatial model
         graph_dummy = utils.new_graph(dataset_dict["graph_y_0"], new_x=torch.zeros(config['n_space'], 1))
 
+        
         post_mean_model = inference.posterior_inference(
             temporal_model=temporal_model, 
             dgmrf=dgmrf, 
@@ -364,8 +373,8 @@ def main():
         
         # End timing
         current_time = time.time()
-        elapsed_time = (current_time - start_time) / 60
-        print(f"Computation time for posterior inference CG method: {elapsed_time:.2f} minutes")
+        elapsed_time_inference = (current_time - start_time) / 60
+        print(f"Computation time for posterior inference CG method: {elapsed_time_inference:.2f} minutes")
 
     # NEXT UP: 
     # (1) Compute true posterior mean and std.-dev. for comparison - perhaps best to do so in advection_diffusion.py to include it in the dataset_dict
@@ -399,12 +408,14 @@ def main():
             # Load graph
             if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
                 graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
+                k_index = k + config["sample_times_start"]
             else:
                 graph_k = dataset_dict["graph_y_" + str(k)]
+                k_index = k
 
             # Compute metrics for unobserved nodes
             inverse_mask = torch.logical_not(graph_k.mask)
-            diff = (post_mean_model[:,k] - post_mean_true[:,k])[inverse_mask]
+            diff = (post_mean_model[:,k] - post_mean_true[:,k_index])[inverse_mask]
             mae = torch.mean(torch.abs(diff))
             rmse = torch.sqrt(torch.mean(torch.pow(diff, 2)))
             mae_total += mae
@@ -415,6 +426,10 @@ def main():
 
         print("Total MAE of posterior mean: {:.7}".format(mae_total))
         print("Total RMSE of posterior meam: {:.7}".format(rmse_total))
+
+        print(post_mean_model[:,k][inverse_mask][0:5])
+        print(post_mean_true[:,k_index][inverse_mask][0:5])
+
 
     
     # # Compare posterior mean with y
