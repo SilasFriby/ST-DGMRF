@@ -26,7 +26,7 @@ def get_config():
     parser.add_argument("--n_iterations", type=int,
         help="How many iterations to train for", default=1)
     parser.add_argument("--n_training_samples", type=int,
-        help="Number of samples to use for each iteration in training", default=2)
+        help="Number of samples to use for each iteration in training", default=1)
     parser.add_argument("--val_interval", type=int, default=10, 
         help="Evaluate model every val_interval:th iteration")
     parser.add_argument("--sample_times_start", type=float, default=2,
@@ -148,6 +148,7 @@ def main():
         config["n_time"] = config["sample_times_end"] - config["sample_times_start"] + 1
 
     # Data quantities
+    mask_list = []
     obs_mask_list = []
     n_obs_list = []
     n_unobs_list = []
@@ -158,6 +159,9 @@ def main():
             graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
         else:
             graph_k = dataset_dict["graph_y_" + str(k)]
+
+        # Mask
+        mask_list.append(graph_k.mask)
 
         # Observations masked
         obs_mask_list.append(graph_k.mask * graph_k.x[:,0])
@@ -170,6 +174,7 @@ def main():
         val_mask_list.append(val_mask)
         n_unobs_list.append(torch.sum(val_mask).to(torch.float32))
         
+    mask_stack = torch.stack(mask_list, dim=0)    
     obs_mask_stack = torch.stack(obs_mask_list, dim=0)
     n_obs_stack = torch.stack(n_obs_list, dim=0)
     n_unobs_stack = torch.stack(n_unobs_list, dim=0)
@@ -224,13 +229,13 @@ def main():
         vi_samples = vi_dist.sample()
 
         # Run samples through temporal model: 
-        # f(x) = Fx + b_f = h, which is a vector with elements h_k = x_k - F_k x_{k+1} + b_f_k for k = 0, ..., n-2 
-        # and h_{n-1} = x_{n-1} + b_f_{n-1}
+        # f(x) = Fx + b_f = h, which is a vector with elements h_0 = x_0 + b_f_0
+        # and h_k = x_{k+1} - F_k x_k + b_f_k for k = 1, ..., n-1  
         # !! WE ASSUME THAT F_k is equal for all k and that the layers in F_k are shared across time steps !!
-        x_k = vi_samples[:-1] # [:-1] remove last time step
-        F_k_x_k_plus_1 = temporal_model(vi_samples[1:].unsqueeze(3)) # [1:] remove first time step
-        x_n_minus_1 = vi_samples[-1].unsqueeze(0) # [-1] last time step
-        h = torch.cat((x_k - F_k_x_k_plus_1.squeeze(3), x_n_minus_1))
+        x_k_plus_1 = vi_samples[1:] # [1:] exclude first time step
+        F_k_x_k = temporal_model(vi_samples[:-1].unsqueeze(3)) # [:-1] exclude last time step
+        x_0 = vi_samples[0].unsqueeze(0) # [0] first time step
+        h = torch.cat((x_0, x_k_plus_1 - F_k_x_k.squeeze(3))) # F_k_x_k includes bias
 
 
         # Run F-transformed samples, h, through spatial model:
@@ -344,12 +349,17 @@ def main():
         # Start timing
         start_time = time.time() 
 
+        # Initialize graph_dummy for spatial model
+        graph_dummy = utils.new_graph(dataset_dict["graph_y_0"], new_x=torch.zeros(config['n_space'], 1))
+
         post_mean_model = inference.posterior_inference(
             temporal_model=temporal_model, 
-            dgmrf_list=dgmrf_list, 
-            vi_dist_list=vi_dist_list,
+            dgmrf=dgmrf, 
+            vi_dist=vi_dist,
             config=config,  
-            dataset_dict=dataset_dict
+            graph_dummy=graph_dummy,
+            obs_mask_stack=obs_mask_stack,
+            mask_stack=mask_stack,
         )
         
         # End timing
