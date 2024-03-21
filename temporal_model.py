@@ -11,7 +11,7 @@ class TemporalModel(torch.nn.Module):
 
         self.layers = torch.nn.ModuleList(layer_list)
 
-    def forward(self, x, with_bias=True):
+    def forward(self, x, transpose=False, with_bias=True):
         # x is now expected to have shape [n_time, n_samples, n_space, other_dim]
         
         # Process all time steps together through each layer
@@ -20,11 +20,12 @@ class TemporalModel(torch.nn.Module):
             n_time, n_samples, n_space, other_dim = x.shape
             x = x.view(n_time * n_samples, n_space, other_dim)  # Collapse time and samples together
 
-            x = layer(x, with_bias)  # Apply the layer
+            x = layer(x, with_bias, transpose)  # Apply the layer
 
             # After processing, reshape x to split time and samples again
             x = x.view(n_time, n_samples, n_space, other_dim)
 
         return x
+   
 
 

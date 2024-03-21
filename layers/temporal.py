@@ -13,7 +13,7 @@ class TemporalLayer(torch.nn.Module):
         self.v2 = torch.nn.Parameter(torch.tensor(0.3))  # v2^l, initialized to 0.3
         self.b_f = torch.nn.Parameter(torch.tensor(0.0))  # b_f^l, initialized to 0
 
-    def forward(self, x, with_bias=True):
+    def forward(self, x, transpose=False, with_bias=True):
             
         # Create identity matrix
         identity_matrix = torch.eye(self.n_space, dtype=x.dtype)
@@ -28,7 +28,13 @@ class TemporalLayer(torch.nn.Module):
         # Batch matrix multiplication with broadcasting using torch.matmul
         # torch.matmul supports broadcasting and can handle the case when F has a batch dimension of 1
         # and x has a different batch size.
-        result = torch.matmul(F, x)
+        
+        # Transpose F if requested
+        if transpose:
+            F_T = torch.transpose(F, -2, -1)  # Make sure to transpose the last two dimensions considering F has an additional batch dimension due to unsqueeze(0)
+            result = torch.matmul(F_T, x)
+        else:
+            result = torch.matmul(F, x)
 
         # Add bias
         if with_bias:

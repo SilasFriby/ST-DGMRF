@@ -197,7 +197,7 @@ class VariationalDistBatch(torch.nn.Module):
         layers_log_det = sum([layer.log_det() for layer in self.layers])
 
         # Reshape std and post_diag to separate time and space dimensions
-        # Then compute the log det for each time step and sum across all space dimensions
+        # Then compute the log det for each time step and sum across the space dimension
         # Finally, sum across all time steps
         std_log_det = torch.sum(torch.log(self.std.view(self.n_time, self.n_space)), dim=1)
         total_std_log_det = torch.sum(std_log_det)
