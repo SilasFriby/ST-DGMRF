@@ -29,6 +29,6 @@ class DGMRF(torch.nn.Module):
         return x
 
     def log_det(self):
-        # Sum log-determinants of all layers and multiply by n_time. Correct when S_k is equal for all k!!
-        return self.n_time * sum([layer.log_det() for layer in self.layers])
+        # Sum log-determinants of all layers
+        return sum([layer.log_det() for layer in self.layers])
     

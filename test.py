@@ -17,7 +17,7 @@ import vi
 from dgmrf import DGMRF
 import constants
 import utils
-import inference
+import inference_new
 
 from temporal_model import TemporalModel
 import matplotlib.pyplot as plt

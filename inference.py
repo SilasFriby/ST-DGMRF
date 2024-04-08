@@ -22,7 +22,7 @@ def regularized_cg(
         verbose=False):
     
     # Initial values
-    x_i = x0.to(torch.float64) 
+    x_i = x0 
     nu = nu0
 
     ## Solve the regularized linear system (νI + A)x = νx^(i) + b
@@ -38,10 +38,7 @@ def regularized_cg(
 
     # Right-hand side        
     def rhs(x, nu): 
-        return B #nu * x + B  
-
-    # # Divergence counter
-    # count_divergence = 0
+        return B #nu * x + B    
     
     # Run the regularized CG iterations
     for outer_iter in range(max_outer_iter):
@@ -68,120 +65,189 @@ def regularized_cg(
         if verbose:
             print("Outer iteration {}: Outer residual norm {}: Inner CG finished in {} iterations, Inner CG solution optimal: {}".format(
                 outer_iter, norm_residuals, cg_info["niter"], cg_info["optimal"]))
-            
-    #     # Update best solution
-    #     if outer_iter == 0:
-    #         best_norm_residuals = norm_residuals
-    #         best_solution = x_i
-    #         best_outer_iter = outer_iter
-    #         best_cg_info = cg_info
-    #     elif norm_residuals < best_norm_residuals and cg_info["optimal"] is True:
-    #         best_norm_residuals = norm_residuals
-    #         best_solution = x_i
-    #         best_outer_iter = outer_iter
-    #         best_cg_info = cg_info
         
 
-    #     # Check for convergence
-    #     if norm_residuals < rtol: # or cg_info["optimal"] is True:
-    #         break 
-
-    #     # Check for divergence
-    #     if norm_residuals > best_norm_residuals and cg_info["optimal"] is False:
-    #         count_divergence += 1
-    #     else: # Reset to zero
-    #         count_divergence = 0
-
-    #     if count_divergence > 10:
-    #         print("Divergence detected. Exiting before reaching the maximum number of outer iterations.")
-    #         break
-
-    # # Optionally print final CG information
-    # if verbose:
-    #     print("Solution with lowest residual norm was found in Outer iteration {} with residual norm {}. The inner CG had solution optimal: {}".format(
-    #         best_outer_iter, best_norm_residuals, best_cg_info["optimal"]))
+        # Check for convergence
+        if norm_residuals < rtol: # or cg_info["optimal"] is True:
+            break   
 
     return x_i
 
 
-# Solve Omega_plus x = rhs using Conjugate Gradient
+# Solve Q_tilde x = rhs using Conjugate Gradient
 def cg_solve(
         rhs, 
         temporal_model, 
-        dgmrf, 
+        dgmrf_list, 
         config, 
+        dataset_dict, 
         rtol, 
-        cg_start_guess,
-        graph_dummy, 
-        mask_stack,
-        verbose=False,):
+        cg_start_guess, 
+        verbose=False):
     
-    #### Conjugate Gradient
-    #### Solve Omega_plus x = rhs, where Omega_plus = F^T @ Q @ F + (1/sigma^2) * I_masked, see equation (17)
-   
-    # (1) Compute F @ x 
-    # (2) Compute Q @ (F @ x) = S^T @ S @ (F @ x)
-    # (3) Compute F^T @ (Q @ (F @ x)) = F^T @ S^T @ S @ (F @ x)
-    # (4) (1/sigma^2)masked_obs
+    n_time = config["n_time"]
+    n_space = config["n_space"]
 
     # CG requires more precision for numerical stability
     rhs = rhs.to(torch.float64) 
-    cg_start_guess = cg_start_guess.to(torch.float64)
+    cg_start_guess = cg_start_guess.to(torch.float64)   
 
-    # x = torch.randn(config["n_time"] * config["n_space"]) # random initial guess
+    ## Create Q as sparse matrix - diagonal block matrix with Q_k in every block
 
-    # Define Omega_plus as a function of x
-    def Omega_plus_func(x):
+    # Initialize lists for indices and values for the sparse tensor
+    indices_list = []
+    values_list = []
 
-        ## (1) F @ x
+    for k in range(n_time):
+        # Q_k block indices and values
+        row_indices = torch.arange(k * n_space, (k + 1) * n_space).unsqueeze(1).repeat(1, n_space).flatten()
+        col_indices = torch.arange(k * n_space, (k + 1) * n_space).repeat(n_space)
+        id_indices = torch.stack([row_indices, col_indices], dim=0)
 
-        # Reshape x to math the input shape of the temporal model
-        x = x.reshape(config["n_time"], 1, config["n_space"]) # the second 1 is n_sample = 1. This dimension is necessary for the temporal model below
+        ## Q_k = S_k^T @ S_k
 
-        # Run x through temporal model without bias to get F @ x 
-        # f(x) = Fx + b_f = h, which is a vector with elements h_0 = x_0 + b_f_0
-        # and h_k = x_{k+1} - F_k x_k + b_f_k for k = 1, ..., n-1  
-        # !! WE ASSUME THAT F_k is equal for all k and that the layers in F_k are shared across time steps !!
-        x_k_plus_1 = x[1:] # [1:] exclude first time step
-        F_k_x_k = temporal_model(x[:-1].unsqueeze(3), with_bias=False) # [:-1] exclude last time step
-        x_0 = x[0].unsqueeze(0) # [0] first time step
-        F_x = torch.cat((x_0, x_k_plus_1 - F_k_x_k.squeeze(3))) 
+        # Spatial model at time k
+        dgmrf_k = dgmrf_list[k]
 
-        ## (2) Q @ (F @ x) = S^T @ S @ (F @ x)
+        # Initialize S_k as an identity matrix
+        S_k = torch.eye(n_space)
 
-        # Run Fx through spatial model without bias to obtain S @ (F @ x)
-        # !! WE ASSUME THAT S_k is equal for all k and that the layers in S_k are shared across time steps !!
-        graph_dummy.x = F_x.reshape(-1, 1)  # Reshape Fx to [n_time * n_space, 1]
-        S_F_x = dgmrf(graph_dummy, with_bias=False)
+        # Multiply the S matrices of each spatial layer to get the final S_k - !!!!ONLY CORRECT IF THERE ARE NO NON-LINEAR LAYERS!!!!
+        for layer in dgmrf_k.layers:
+            S_layer = layer.create_S_matrix(degree_matrix=dataset_dict['degree_matrix'], 
+                                            adjacency_matrix=dataset_dict['adjacency_matrix'])
+            S_k = torch.matmul(S_layer, S_k)  # Update F by multiplying by the new F_layer
 
-        # Run S_F_x through spatial model without bias and transpose equal True to obtain Q @ F @ x = S^T (S @ F @ x)
-        graph_dummy.x = S_F_x
-        Q_F_x = dgmrf(graph_dummy, transpose=True, with_bias=False)
+        # S_k Transpose
+        S_k_T = torch.transpose(S_k, 0, 1)
 
+        # Q_k
+        Q_k = torch.matmul(S_k_T, S_k)
 
-        ## (3) F^T @ (Q @ (F @ x)) = F^T @ S^T @ S @ (F @ x)
+        # Values for the Q_k block
+        id_values = Q_k.flatten()
 
-        # Reshape Q_F_x to math the input shape of the temporal model
-        Q_F_x = Q_F_x.reshape(config["n_time"], 1, config["n_space"]) # the second 1 is n_sample = 1. This dimension is necessary for the temporal model below
+        indices_list.append(id_indices)
+        values_list.append(id_values)
 
-        # Run Q_F_x through temporal model without bias and transpose equal True to obtain F^T @ (Q @ F @ x)
-        x_k = Q_F_x[:-1] # [:-1] exclude last time step
-        F_T_k_x_k_plus_1 = temporal_model(Q_F_x[1:].unsqueeze(3), transpose=True, with_bias=False) # [1:] exclude first time step
-        x_n_minus_1 = Q_F_x[-1].unsqueeze(0) # [-1] last time step
-        F_T_Q_F_x = torch.cat((x_k - F_T_k_x_k_plus_1.squeeze(3), x_n_minus_1)) 
-        F_T_Q_F_x = F_T_Q_F_x.reshape(-1, 1) # shape [n_time * n_space, 1]
+    # Concatenate indices and values from all blocks
+    all_indices = torch.cat(indices_list, dim=1)
+    all_values = torch.cat(values_list)
+
+    # Create the sparse tensor representing Q
+    size = (n_time * n_space, n_time * n_space)
+    Q = torch.sparse_coo_tensor(all_indices, all_values, size)
+    # print(Q.to_dense())
+
+    ## Create F and F^T as sparse matrices
+    ## F is a block lower bi-diagonal matrix with I in the diagonal and -F_k in the subdiagonal
+    ## F^T is a block upper bi-diagonal matrix with I in the diagonal and -F_k^T in the superdiagonal
+
+    # Initialize F_k as an identity matrix
+    F_k = torch.eye(n_space)
+
+    # Multiply the F matrices of each TemporalLayer to get the final F_k - !!!!WORKS ONLY FOR LAYER I - M!!!!
+    for layer in temporal_model.layers:
+        # You need to create the M matrix and add the identity matrix
+        M_layer = layer.create_matrix_M()
+        F_layer = torch.eye(M_layer.size(0)) + M_layer
+        F_k = torch.matmul(F_layer, F_k)  # Update F by multiplying by the new F_layer
+
+    # F_k Transpose
+    F_k_T = torch.transpose(F_k, 0, 1)
+
+    # Initialize lists for indices and values for the sparse tensor
+    indices_list = []
+    values_list = []
+    indices_list_T = []
+    values_list_T = []
+
+    for i in range(n_time):
+        # Identity block indices and values
+        row_indices = torch.arange(i * n_space, (i + 1) * n_space)
+        col_indices = row_indices  # Same for identity matrix
+        id_indices = torch.stack([row_indices, col_indices], dim=0)
         
-        ## (4) (1/sigma^2)masked_obs
-  
-        mask = mask_stack.reshape(-1,1) # shape [n_time * n_space, 1]
-        noise_term = (1./utils.noise_var(config)) * mask
+        # Values for the identity matrix are all ones
+        id_values = torch.ones(n_space)
+        
+        indices_list.append(id_indices)
+        values_list.append(id_values)
+        indices_list_T.append(id_indices)
+        values_list_T.append(id_values)
+        
+        # Add F_k on the subdiagonal and F_k_T on the superdiagonal
+        if i < n_time - 1:
+            # Sub- and superdiagonal block indices
+            sub_row_indices = torch.arange((i + 1) * n_space, (i + 2) * n_space).unsqueeze(1).repeat(1, n_space).flatten()
+            sub_col_indices = torch.arange(i * n_space, (i + 1) * n_space).repeat(n_space)
+            sub_indices = torch.stack([sub_row_indices, sub_col_indices], dim=0)
 
+            super_row_indices = torch.arange(i * n_space, (i + 1) * n_space).unsqueeze(1).repeat(1, n_space).flatten()
+            super_col_indices = torch.arange((i + 1) * n_space, (i + 2) * n_space).repeat(n_space)
+            super_indices = torch.stack([super_row_indices, super_col_indices], dim=0)
+            
+            # Flatten F_k and F_k_T to get the values for the sub- and superdiagonal block
+            super_values = -F_k_T.flatten()
+            sub_values = -F_k.flatten()
+            
+            indices_list.append(sub_indices)
+            values_list.append(sub_values)
+            indices_list_T.append(super_indices)
+            values_list_T.append(super_values)
 
-        ## Omega_plus x = F^T @ Q @ F @ x + (1/sigma^2) * I_masked @ x
+    # Concatenate indices and values from all blocks
+    all_indices = torch.cat(indices_list, dim=1)
+    all_values = torch.cat(values_list)
+    all_indices_T = torch.cat(indices_list_T, dim=1)
+    all_values_T = torch.cat(values_list_T)
 
-        Omega_plus_x = F_T_Q_F_x + noise_term * x.reshape(-1, 1)
+    # Create the sparse tensor representing F and F_T
+    size = (n_time * n_space, n_time * n_space)
+    F = torch.sparse_coo_tensor(all_indices, all_values, size)
+    F_T = torch.sparse_coo_tensor(all_indices_T, all_values_T, size)
 
-        return Omega_plus_x.to(torch.float64)
+    ## Create noise term = (1/sigma^2) * I_masked
+
+    # Loop over time to find unobserved nodes at each time - i.e the mask
+    for k in range(n_time):
+        if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
+            graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
+        else:
+            graph_k = dataset_dict["graph_y_" + str(k)]
+
+        mask_k = graph_k.mask.to(torch.float64).unsqueeze(1)  
+
+        # Concatenate masked_y_k
+        if k == 0:
+            mask = mask_k
+        else:
+            mask = torch.cat((mask, mask_k), dim=0)
+
+    # Create noise term
+    noise_term = (1./utils.noise_var(config)) * mask
+
+    # Create noise_term_matrix as a sparse diag matrix with noise_term as the diagonal
+    noise_term_matrix = torch.sparse_coo_tensor(
+        indices=torch.stack([torch.arange(n_time * n_space), torch.arange(n_time * n_space)]), 
+        values=noise_term.flatten(), 
+        size=(n_time * n_space, n_time * n_space)
+    )
+
+    ##  Create linear function for Omega plus, see equation (17)
+    
+    # Convert all matrices to double precision
+    F_T = F_T.to(torch.float64)
+    F = F.to(torch.float64)
+    Q = Q.to(torch.float64)
+    noise_term_matrix = noise_term_matrix.to(torch.float64)
+
+    # Define Omega_plus as a function
+    # It is more efficient to perform multiple sparse matrix multiplications with vector x, than to form the full matrix Omega_plus
+    def Omega_plus_func(x):
+        Omega_plus_x = torch.sparse.mm(F_T, torch.sparse.mm(Q, torch.sparse.mm(F, x))) + torch.sparse.mm(noise_term_matrix, x)
+        return Omega_plus_x
+
 
     ## Regularized CG
 
@@ -236,90 +302,165 @@ def sample_posterior(n_samples, dgmrf, graph_y, config, rtol, verbose=False):
 @torch.no_grad()
 def posterior_inference(
     temporal_model, 
-    dgmrf, 
-    vi_dist, 
+    dgmrf_list, 
+    vi_dist_list, 
     config, 
-    graph_dummy,
-    obs_mask_stack,
-    mask_stack,
+    dataset_dict
 ):
     
     #### Posterior mean
-    #### RHS consists of Omega @ mu + (1 / sigma ^ 2) * masked_obs, where Omega @ mu = = F^T @ Q @ c = F^T @ S^T @ S @ c, see equation (9)
+    #### RHS consists of Omega @ mu + (1 / sigma ^ 2) * y_masked, where Omega @ mu = = F^T @ Q @ c = F^T @ S^T @ S @ c, see equation (9)
    
     # (1) Compute S @ c - recall that ST-DGMRF model bias is b_theta = -(S @ c), cf. section 3.1.2
     # (2) Compute Q @ c = S^T @ S @ c
     # (3) Compute F^T - block upper diagonal matrix with I in the diagonal anf F^T in the upper diagonal
-    # (4) Omega @ mu = F^T @ Q @ c
-    # (5) (1/sigma^2)masked_obs
-    # (6) RHS = Omega @ mu + (1/sigma^2)masked_obs
+    # (4) (1/sigma^2)y_masked
+
+    n_time = config["n_time"]
+    n_space = config["n_space"]
 
     ## (1) S @ c 
 
-    # Feed zeros through the temporal model to obtain overall bias
-    # !! WE ASSUME THAT THE BIAS IS THE SAME FOR ALL TIME POINTS !!
-    zeros = torch.zeros(1, 1, config["n_space"], 1)
-    b_f_k = temporal_model(zeros, with_bias=True) 
+    for k in range(n_time):
+        # Load graph at time k
+        if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
+            graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
+        else:
+            graph_k = dataset_dict["graph_y_" + str(k)]
 
-    # Feed b_f through spatial model to obtain model bias b_theta
-    # !! WE ASSUME THAT THE BIAS IS THE SAME FOR ALL TIME POINTS !!
-    graph_dummy.x = b_f_k
-    b_theta_k = dgmrf(graph_dummy, with_bias=True) # b_theta_k = S_k @ b_f_k + b_s_k
+        # Feed zeros through temporal model to get temporal bias b_f at time k
+        zeros_temporal_format = torch.zeros(1, 1, n_space, 1) 
+        b_f_k = temporal_model(zeros_temporal_format, with_bias=True) #  SHOULD b_f_k BE DIFFERENT FOR EACH TIME POINT?? 
 
-    # S @ c = -b_theta, cf. equation (10)
-    S_c_k = -b_theta_k
+        # Prepare b_f_k for spatial model
+        graph_k.x = b_f_k.reshape(-1,1)
 
-    ## (2) Q @ c = S^T @ S @ c
+        # Feed b_f_k through spatial model to obtain model bias at time k b_theta_k
+        dgmrf_k = dgmrf_list[k]
+        b_theta_k = dgmrf_k(graph_k, with_bias=True) # b_theta_k = S_k @ b_f_k + b_s_k
+        
+        # S @ c = -b_theta, cf. equation (10)
+        S_c_k = -b_theta_k
 
-    graph_dummy.x = S_c_k
-    Q_c_k = dgmrf(graph_dummy, transpose=True, with_bias=False) # S^T @ S @ c
+        ## (2) Q @ c = S^T @ S @ c
+
+        # At time k
+        graph_k.x = S_c_k
+        Q_c_k = dgmrf_k(graph_k, transpose=True, with_bias=False) # S^T @ S @ c
+
+        # Append Q_c_k
+        if k == 0:
+            Q_c = Q_c_k
+        else: # append
+            Q_c = torch.cat([Q_c, Q_c_k], dim=0)
+
+    ## (3) F^T - block upper diagonal matrix with I in the diagonal anf -F_k^T in the super diagonal
+
+    # Initialize F_k as an identity matrix
+    F_k = torch.eye(n_space)
+
+    # Multiply the F_layer matrices of each TemporalLayer to get the final F_k - !!!! CURRENT CODE WORKS ONLY FOR LAYER I + M!!!!
+    for layer in temporal_model.layers:
+        # You need to create the M matrix and add the identity matrix
+        M = layer.create_matrix_M()
+        F_layer = torch.eye(M.size(0)) + M
+        F_k = torch.matmul(F_layer, F_k)  # Update F by multiplying by the new F_layer
     
-    # Repeat Q_c_k for all time points
-    Q_c = torch.tile(Q_c_k.squeeze(1), (config["n_time"], 1, 1)) # the second 1 is n_sample = 1. This dimension is necessary for the temporal model below
-
-
-    ## (3) F^T x, where x is the vector of Q_c 
-
-    # F^T x = y, which is a vector with elements y_k = x_k - F^T_k x_{k+1} for k = 0, ..., n-2 and y_n = x_n  
-    x_k = Q_c[:-1] # [:-1] exclude last time step
-    F_T_k_x_k_plus_1 = temporal_model(Q_c[1:].unsqueeze(3), transpose=True, with_bias=False) # [1:] exclude first time step
-    x_n_minus_1 = Q_c[-1].unsqueeze(0) # [-1] last time step
-    F_T_Q_c = torch.cat((x_k - F_T_k_x_k_plus_1.squeeze(3), x_n_minus_1)) 
-
-
-    ## (4) Omega @ mu = F^T @ Q @ c
-
-    Omega_mu = F_T_Q_c.squeeze(1).reshape(-1, 1) # shape [n_time * n_space, 1]
-
-
-    ## (5) Noise obs term (1/sigma^2)masked_obs
     
-    masked_obs = obs_mask_stack.reshape(-1,1).to(torch.float64) # shape [n_time * n_space, 1]
-    noise_obs_term = (1./utils.noise_var(config)) * masked_obs
+    # F_k Transpose
+    F_k_T = torch.transpose(F_k, 0, 1)
 
-    ## (6) RHS = Omega_mu + noise_obs_term
+    # Initialize lists for indices and values for the sparse tensor
+    indices_list = []
+    values_list = []
+
+    for i in range(n_time):
+        # Identity block indices and values
+        row_indices = torch.arange(i * n_space, (i + 1) * n_space)
+        col_indices = row_indices  # Same for identity matrix
+        id_indices = torch.stack([row_indices, col_indices], dim=0)
+        
+        # Values for the identity matrix are all ones
+        id_values = torch.ones(n_space)
+        
+        indices_list.append(id_indices)
+        values_list.append(id_values)
+        
+        # Add F_k_T on the superdiagonal
+        if i < n_time - 1:
+            # Superdiagonal block indices
+            super_row_indices = torch.arange(i * n_space, (i + 1) * n_space).unsqueeze(1).repeat(1, n_space).flatten()
+            super_col_indices = torch.arange((i + 1) * n_space, (i + 2) * n_space).repeat(n_space)
+            super_indices = torch.stack([super_row_indices, super_col_indices], dim=0)
             
-    rhs = Omega_mu + noise_obs_term
-    rhs = rhs.unsqueeze(0) # batch dimension - necessary for cg_batch function
+            # Flatten F_k_T_example to get the values for the superdiagonal block
+            super_values = -F_k_T.flatten()
+            
+            indices_list.append(super_indices)
+            values_list.append(super_values)
+
+    # Concatenate indices and values from all blocks
+    all_indices = torch.cat(indices_list, dim=1)
+    all_values = torch.cat(values_list)
+
+    # Create the sparse tensor representing F_T
+    size = (n_time * n_space, n_time * n_space)
+    F_T = torch.sparse_coo_tensor(all_indices, all_values, size)
+    # print(F_T.to_dense())
+
+    ## Omega @ mu = F^T @ Q @ c
+
+    F_T = F_T.to(torch.float64) 
+    Q_c = Q_c.to(torch.float64)       
+    Omega_mu = torch.sparse.mm(F_T, Q_c)
+
+    ## y_masked
+
+    for k in range(n_time):
+        if config["sample_times_start"] is not None and config["sample_times_end"] is not None:
+            graph_k = dataset_dict["graph_y_" + str(k + config["sample_times_start"])]
+        else:
+            graph_k = dataset_dict["graph_y_" + str(k)]
+
+        masked_y_k = graph_k.mask.to(torch.float64).unsqueeze(1) * graph_k.x  
+
+        # Concatenate masked_y_k
+        if k == 0:
+            masked_y = masked_y_k
+        else:
+            masked_y = torch.cat((masked_y, masked_y_k), dim=0)
+
+    ## RHS
+            
+    rhs = Omega_mu + (1./utils.noise_var(config)) * masked_y
+
+    # Add batch dimension - necessary for cg_batch function
+    rhs = rhs.unsqueeze(0)
 
     ## CG Solve
 
     # Initial guess - use mean of VI distribution
-    cg_start_guess = vi_dist.mean_param.reshape(-1, 1)
-    cg_start_guess = cg_start_guess.unsqueeze(0) # batch dimension - necessary for cg_batch function
+    cg_start_guess = []
+
+    for vi_dist in vi_dist_list:
+        # Assume vi_dist.mean_param is a tensor; append it to the list
+        cg_start_guess.append(vi_dist.mean_param)
+    
+    # Concatenate the list of tensors to a single tensor
+    cg_start_guess = torch.cat(cg_start_guess, dim=0)
+
+    # Add batch dimension - necessary for cg_batch function
+    cg_start_guess = cg_start_guess.unsqueeze(0).unsqueeze(2)
 
     # Posterior mean
-    post_mean = cg_solve(rhs=rhs,
+    post_mean = cg_solve(rhs = rhs,
                          temporal_model=temporal_model, 
-                         dgmrf=dgmrf, 
+                         dgmrf_list=dgmrf_list, 
                          config=config, 
+                         dataset_dict=dataset_dict, 
                          rtol=config["inference_rtol"], 
                          cg_start_guess=cg_start_guess,
-                         graph_dummy=graph_dummy,
-                         mask_stack=mask_stack,
                          verbose=True)[0]
-    
-
     
     # graph_post_mean = utils.new_graph(graph_y, new_x=post_mean)
 
@@ -358,4 +499,3 @@ def posterior_inference(
     #             title="Posterior sample {}".format(sample_i))
 
     return post_mean #graph_post_mean, graph_post_std
-
